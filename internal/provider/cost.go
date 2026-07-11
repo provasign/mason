@@ -19,9 +19,6 @@ var priceTable = []struct {
 	{"gpt-4.1-mini", 0.40, 1.60},
 	{"gpt-4.1", 2, 8},
 	{"o3", 2, 8},
-	{"gemini-2.5-pro", 1.25, 10},
-	{"gemini-2.5-flash", 0.30, 2.50},
-	{"gemini-2.0-flash", 0.10, 0.40},
 }
 
 // EstimateCost returns the estimated USD cost of usage for a model spec.

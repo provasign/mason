@@ -52,13 +52,25 @@ mason "task…"                  # one-shot
 mason --continue "follow-up…"  # resume this repo's previous conversation
 mason --model ollama:qwen3-coder:30b "task…"
 mason --model claude:claude-haiku-4-5-20251001 "task…"
-mason --model gemini:gemini-2.5-flash "task…"
 mason --dir ~/src/project --yes "task…"   # --yes skips bash/edit prompts
 ```
 
-Model auto-detection prefers an installed blessed Ollama model
-(qwen3-coder:30b, qwen2.5-coder:14b), then Anthropic, then OpenAI, then
-Gemini.
+## Free local models — zero setup knowledge required
+
+```
+mason models
+```
+
+shows what is already installed, what your machine can run (filtered by
+memory), and downloads a pick on a single keypress — including installing
+the Ollama runtime itself if it's missing. If you start mason with no model
+anywhere, it offers this setup instead of an error. `/models` does the same
+inside the REPL. The catalog is curated to coding models with tool-calling
+support (the measured floor for driving mason); ★ entries are measured in
+the provasign study.
+
+Model auto-detection: best installed local model first (catalog order),
+then any installed local model, then Anthropic, then OpenAI.
 
 Works on an existing repo or an **empty directory** — "start a brand new Go
 project with a module, a package, and tests" scaffolds, builds, and tests a
@@ -104,9 +116,9 @@ half the parent's turn budget, optional cheaper model
 
 ## Credentials
 
-Resolved in order: environment variable (`ANTHROPIC_API_KEY` /
-`OPENAI_API_KEY`) → **OS keychain** → interactive prompt (echo off, offer to
-store). The keychain (macOS Keychain, Windows Credential Manager, Linux
+Local models need no credentials. For paid APIs, keys resolve in order:
+environment variable (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) → **OS
+keychain** → interactive prompt (echo off, offer to store). The keychain (macOS Keychain, Windows Credential Manager, Linux
 Secret Service) is the only place mason ever persists a key. Keys are never
 written to config files, sessions, logs, or the shale trail, and provider
 error paths scrub the key value.

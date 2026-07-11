@@ -140,7 +140,6 @@ func truncate(s string, n int) string {
 //	ollama:<model>     local Ollama (default http://localhost:11434)
 //	claude:<model>     Anthropic API (ANTHROPIC_API_KEY)
 //	openai:<model>     OpenAI API (OPENAI_API_KEY)
-//	gemini:<model>     Google Gemini API (GEMINI_API_KEY)
 //
 // A bare spec with no prefix is treated as an Ollama model name.
 // getKey resolves the API key for a vendor ("anthropic" | "openai"); it is
@@ -166,12 +165,6 @@ func NewProvider(spec string, getKey func(vendor string) (string, error)) (Provi
 			return nil, fmt.Errorf("openai:%s: %w", model, err)
 		}
 		return &openaiProvider{model: model, key: key}, nil
-	case "gemini", "google":
-		key, err := getKey("gemini")
-		if err != nil {
-			return nil, fmt.Errorf("gemini:%s: %w", model, err)
-		}
-		return &geminiProvider{model: model, key: key}, nil
 	default:
 		// "qwen3-coder:30b" — the whole spec is an Ollama model tag.
 		return &ollamaProvider{model: spec, url: envOr("OLLAMA_HOST_URL", "http://localhost:11434")}, nil
@@ -568,55 +561,13 @@ func (p *openaiProvider) chatOnce(ctx context.Context, msgs []Msg, tools []ToolD
 	return out, nil
 }
 
-// DetectDefaultModel picks a provider when --model is not given: a blessed
-// local Ollama model if one is installed (free, private), else Anthropic's
-// small tier, else OpenAI. The blessed list is the measured set — models
-// verified to sit on the engine ceiling at task altitude. hasKey reports
-// whether a credential is AVAILABLE for a vendor without resolving it (no
-// keychain prompt fires during detection).
-func DetectDefaultModel(hasKey func(vendor string) bool) (string, error) {
-	if raw, err := postJSONGet("http://localhost:11434/api/tags"); err == nil {
-		var tags struct {
-			Models []struct {
-				Name string `json:"name"`
-			} `json:"models"`
-		}
-		if json.Unmarshal(raw, &tags) == nil {
-			installed := map[string]bool{}
-			for _, m := range tags.Models {
-				installed[m.Name] = true
-			}
-			for _, blessed := range []string{"qwen3-coder:30b", "qwen2.5-coder:14b"} {
-				if installed[blessed] {
-					return "ollama:" + blessed, nil
-				}
-			}
-		}
-	}
-	if hasKey("anthropic") {
-		return "claude:claude-haiku-4-5-20251001", nil
-	}
-	if hasKey("openai") {
-		return "openai:gpt-4o-mini", nil
-	}
-	if hasKey("gemini") {
-		return "gemini:gemini-2.5-flash", nil
-	}
-	return "", fmt.Errorf("no model available: install a blessed Ollama model " +
-		"(qwen3-coder:30b or qwen2.5-coder:14b), run `mason login " +
-		"<anthropic|openai|gemini>`, or pass --model explicitly")
+
+// ErrNoModel signals that no provider is available — the CLI catches this
+// to offer the guided local-model setup instead of a bare error.
+var errNoModel = fmt.Errorf("no model available")
+
+// IsNoModel reports whether err is the no-provider-available condition.
+func IsNoModel(err error) bool {
+	return errors.Is(err, errNoModel)
 }
 
-func postJSONGet(url string) ([]byte, error) {
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	c := &http.Client{Timeout: 3 * time.Second}
-	resp, err := c.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	return io.ReadAll(resp.Body)
-}

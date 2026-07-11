@@ -86,9 +86,6 @@ func TestEstimateCost(t *testing.T) {
 	if c != 6.0 { // $1 in + $5 out
 		t.Fatalf("haiku cost = %f", c)
 	}
-	if EstimateCost("gemini:gemini-2.5-flash", 1e6, 0) != 0.30 {
-		t.Fatal("gemini flash input price wrong")
-	}
 	if EstimateCost("openai:gpt-4o-mini", 0, 1e6) != 0.60 {
 		t.Fatal("4o-mini output price wrong")
 	}

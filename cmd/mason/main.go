@@ -21,6 +21,7 @@ import (
 
 	"github.com/provasign/mason/internal/agent"
 	"github.com/provasign/mason/internal/creds"
+	"github.com/provasign/mason/internal/localmodels"
 	"github.com/provasign/mason/internal/provider"
 	"github.com/provasign/prism/pkg/kit"
 )
@@ -31,25 +32,26 @@ const usage = `mason — coding agent with the code graph baked in
 
 usage:
   mason [flags] ["task"]        one-shot task, or interactive REPL if omitted
-  mason login <anthropic|openai|gemini>    store an API key in the OS keychain
-  mason logout <anthropic|openai|gemini>   remove a stored API key
+  mason models                  browse, download, and pick free local models
+  mason login <anthropic|openai>    store an API key in the OS keychain
+  mason logout <anthropic|openai>   remove a stored API key
   mason version
 
 flags:
-  --model <spec>   ollama:<tag> | claude:<m> | openai:<m> | gemini:<m>  (default: auto-detect)
+  --model <spec>   ollama:<tag> | claude:<m> | openai:<m>  (default: auto-detect)
   --dir <path>     project root (default: current directory)
   --continue       resume the previous conversation for this directory
   --yes            skip permission prompts for bash/edit/write
   --max-turns <n>  per-task turn budget (default 30)
 
-REPL commands: /model <spec>  /cost  /savings  /compact  /clear  /help  /exit
+REPL commands: /models  /model <spec>  /cost  /savings  /compact  /clear  /help  /exit
 
 Project instructions: AGENTS.md and MASON.md at the root are loaded into the
 system prompt automatically.
 
-credentials: env var (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY) >
-OS keychain > interactive prompt. Keys are never written to config files,
-sessions, or logs.`
+credentials: env var (ANTHROPIC_API_KEY / OPENAI_API_KEY) > OS keychain >
+interactive prompt. Keys are never written to config files, sessions, or
+logs. Local models need no credentials at all.`
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -86,6 +88,17 @@ func run(args []string) int {
 				return 1
 			}
 			fmt.Println("removed", args[1], "credential from the OS keychain")
+			return 0
+		case "models":
+			interactive := term.IsTerminal(int(os.Stdin.Fd()))
+			spec, err := localmodels.Wizard(interactive)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "models:", err)
+				return 1
+			}
+			if spec != "" {
+				fmt.Printf("\nready — just run:  mason\n(auto-detect will pick %s)\n", spec)
+			}
 			return 0
 		case "version", "--version", "-v":
 			fmt.Println("mason", version)
@@ -131,12 +144,11 @@ func run(args []string) int {
 	interactive := term.IsTerminal(int(os.Stdin.Fd()))
 
 	if model == "" {
-		detected, err := provider.DetectDefaultModel(creds.Has)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "mason:", err)
+		model = detectModel(interactive)
+		if model == "" {
+			fmt.Fprintln(os.Stderr, "mason: no model available — run `mason models` to set up a free local model, or `mason login anthropic` / `mason login openai`")
 			return 1
 		}
-		model = detected
 	}
 	p, err := provider.NewProvider(model, func(vendor string) (string, error) {
 		return creds.Get(vendor, interactive)
@@ -292,6 +304,23 @@ func run(args []string) int {
 				fmt.Printf("compacted %d → %d chars\n", before, after)
 			}
 			continue
+		case line == "/models":
+			spec, err := localmodels.Wizard(true)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "models:", err)
+				continue
+			}
+			if spec != "" {
+				np, err := factory(spec)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "model:", err)
+					continue
+				}
+				sess.SetProvider(np)
+				model = spec
+				fmt.Println("switched to", np.Name())
+			}
+			continue
 		case strings.HasPrefix(line, "/model"):
 			spec := strings.TrimSpace(strings.TrimPrefix(line, "/model"))
 			if spec == "" {
@@ -322,6 +351,39 @@ func run(args []string) int {
 	printCost(sess, model)
 	printSavings(k)
 	return 0
+}
+
+// detectModel picks a model automatically: an installed local model from
+// the curated catalog (in catalog order — best first), then any other
+// installed local model, then stored API credentials. When nothing exists
+// and the terminal is interactive, it walks the user through a free local
+// setup instead of failing.
+func detectModel(interactive bool) string {
+	st := localmodels.Detect()
+	if st.ServerUp {
+		installed := st.InstalledSet()
+		for _, m := range localmodels.Catalog {
+			if installed[m.Tag] {
+				return "ollama:" + m.Tag
+			}
+		}
+		if len(st.Installed) > 0 {
+			return "ollama:" + st.Installed[0]
+		}
+	}
+	if creds.Has("anthropic") {
+		return "claude:claude-haiku-4-5-20251001"
+	}
+	if creds.Has("openai") {
+		return "openai:gpt-4o-mini"
+	}
+	if interactive {
+		fmt.Println("No model found — mason can set up a FREE local model for you (no account, no API key).")
+		if spec, err := localmodels.Wizard(true); err == nil && spec != "" {
+			return spec
+		}
+	}
+	return ""
 }
 
 // projectNotes loads AGENTS.md / MASON.md from the root (capped) so repos
