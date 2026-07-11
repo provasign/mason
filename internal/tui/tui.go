@@ -7,6 +7,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"strconv"
 	"strings"
 
@@ -48,8 +49,14 @@ func (u *UI) Writer() *chanWriter { return &chanWriter{ch: u.events} }
 // Permit is the agent's permission gate: it round-trips through the UI so
 // the y/N prompt renders inside the TUI instead of corrupting the screen.
 func (u *UI) Permit(action string) bool {
+	return u.PermitDetail(action, "")
+}
+
+// PermitDetail additionally shows WHAT the action will do (a diff, a
+// content preview) in the transcript before asking y/n.
+func (u *UI) PermitDetail(action, detail string) bool {
 	resp := make(chan bool, 1)
-	u.events <- permMsg{action: action, resp: resp}
+	u.events <- permMsg{action: action, detail: detail, resp: resp}
 	return <-resp
 }
 
@@ -64,7 +71,12 @@ type (
 	chunkMsg string
 	permMsg  struct {
 		action string
+		detail string
 		resp   chan bool
+	}
+	pullDoneMsg struct {
+		tag string
+		err error
 	}
 	doneMsg struct {
 		reply string
@@ -78,7 +90,23 @@ var (
 	permStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("11"))
 	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 	youStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("10"))
+	addStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+	delStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 )
+
+// colorDiff styles -/+ preview lines for the transcript.
+func colorDiff(detail string) string {
+	lines := strings.Split(detail, "\n")
+	for i, l := range lines {
+		switch {
+		case strings.HasPrefix(l, "- "):
+			lines[i] = delStyle.Render(l)
+		case strings.HasPrefix(l, "+ "):
+			lines[i] = addStyle.Render(l)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
 
 type uiModel struct {
 	ui     *UI
@@ -94,6 +122,10 @@ type uiModel struct {
 	cancel context.CancelFunc
 	perm   *permMsg
 	model  string
+	// /models pick lists: 1..len(pickInstalled) switch instantly,
+	// continuing numbers download via ExecProcess.
+	pickInstalled []string
+	pickDownload  []localmodels.Model
 }
 
 func newModel(u *UI, cfg Config) uiModel {
@@ -196,7 +228,25 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case permMsg:
 		mm := msg
 		m.perm = &mm
+		if mm.detail != "" {
+			m.append("\n" + permStyle.Render("proposed: "+mm.action) + "\n" + colorDiff(mm.detail) + "\n")
+		}
 		return m, m.listen()
+
+	case pullDoneMsg:
+		if msg.err != nil {
+			m.append(errStyle.Render("download failed: "+msg.err.Error()) + "\n")
+			return m, nil
+		}
+		m.append("✓ " + msg.tag + " installed\n")
+		spec := "ollama:" + msg.tag
+		if err := m.cfg.SwitchModel(spec); err != nil {
+			m.append(errStyle.Render("model: "+err.Error()) + "\n")
+			return m, nil
+		}
+		m.model = spec
+		m.append("switched to " + spec + "\n")
+		return m, nil
 
 	case doneMsg:
 		m.busy = false
@@ -321,16 +371,21 @@ keys: ↑/↓ PgUp/PgDn scroll · Ctrl+C cancels a running task
 	case "/models":
 		st := localmodels.Detect()
 		ram := localmodels.SystemRAMGB()
+		m.pickInstalled = st.Installed
+		m.pickDownload = nil
+		installed := st.InstalledSet()
 		var b strings.Builder
-		b.WriteString("\ninstalled — switch with /model N:\n")
+		b.WriteString("\ninstalled — /model N switches:\n")
 		for i, t := range st.Installed {
 			fmt.Fprintf(&b, "  %d. %s\n", i+1, t)
 		}
-		b.WriteString("downloadable (run `mason models` in a terminal for one-keypress install):\n")
-		installed := st.InstalledSet()
+		b.WriteString("downloadable — /model N downloads then switches:\n")
+		n := len(st.Installed)
 		for _, c := range localmodels.Catalog {
 			if !installed[c.Tag] && c.Fits(ram) {
-				fmt.Fprintf(&b, "     %-22s %.1f GB · needs %d GB — %s\n", c.Tag, c.DownloadGB, c.MinRAMGB, c.Note)
+				n++
+				m.pickDownload = append(m.pickDownload, c)
+				fmt.Fprintf(&b, "  %d. %-22s %.1f GB · needs %d GB — %s\n", n, c.Tag, c.DownloadGB, c.MinRAMGB, c.Note)
 			}
 		}
 		m.append(b.String())
@@ -342,12 +397,26 @@ keys: ↑/↓ PgUp/PgDn scroll · Ctrl+C cancels a running task
 		}
 		spec := fields[1]
 		if n, err := strconv.Atoi(spec); err == nil {
-			st := localmodels.Detect()
-			if n < 1 || n > len(st.Installed) {
-				m.append(errStyle.Render("no installed model #"+spec+" — see /models") + "\n")
+			if len(m.pickInstalled) == 0 && len(m.pickDownload) == 0 {
+				st := localmodels.Detect()
+				m.pickInstalled = st.Installed
+			}
+			switch {
+			case n >= 1 && n <= len(m.pickInstalled):
+				spec = "ollama:" + m.pickInstalled[n-1]
+			case n > len(m.pickInstalled) && n <= len(m.pickInstalled)+len(m.pickDownload):
+				pick := m.pickDownload[n-1-len(m.pickInstalled)]
+				m.append(fmt.Sprintf("downloading %s (%.1f GB) — the screen hands over to ollama…\n", pick.Tag, pick.DownloadGB))
+				// Suspend the TUI, run ollama pull with its own progress
+				// bars, resume, then switch on success.
+				cmd := exec.Command("ollama", "pull", pick.Tag)
+				return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+					return pullDoneMsg{tag: pick.Tag, err: err}
+				})
+			default:
+				m.append(errStyle.Render("no model #"+fields[1]+" — see /models") + "\n")
 				return m, nil
 			}
-			spec = "ollama:" + st.Installed[n-1]
 		}
 		if err := m.cfg.SwitchModel(spec); err != nil {
 			m.append(errStyle.Render("model: "+err.Error()) + "\n")

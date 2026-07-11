@@ -127,3 +127,26 @@ func TestNoConcurrentTasks(t *testing.T) {
 	}
 	close(block)
 }
+
+// A permission request with a detail block must render the preview in the
+// transcript (diff lines styled) before the y/n prompt.
+func TestPermissionDetailPreview(t *testing.T) {
+	m, u := newTestModel(Config{ModelName: "m",
+		Usage: func() (int, int, float64) { return 0, 0, 0 }})
+	got := make(chan bool, 1)
+	go func() { got <- u.PermitDetail("edit a.go", "- old line\n+ new line") }()
+	ev := <-u.events
+	mm, _ := m.Update(ev)
+	m = mm.(uiModel)
+	if !strings.Contains(m.buf.String(), "proposed: edit a.go") {
+		t.Fatal("preview header missing")
+	}
+	if !strings.Contains(m.buf.String(), "old line") || !strings.Contains(m.buf.String(), "new line") {
+		t.Fatal("diff body missing from transcript")
+	}
+	mm, _ = m.Update(key("n"))
+	m = mm.(uiModel)
+	if ok := <-got; ok {
+		t.Fatal("n must deny")
+	}
+}

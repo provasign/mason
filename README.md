@@ -78,8 +78,13 @@ real project from nothing (verified E2E with a local model at $0).
 
 Interactive sessions open a **full-screen TUI**: scrolling transcript,
 input box, spinner, and a live status bar (state · tokens · cost · model).
-Permission prompts render inline (y/n), Ctrl+C cancels the running task
-without killing the session, ↑/↓/PgUp/PgDn scroll history. `--no-tui`
+Assistant replies render as **markdown**. Permission prompts render inline
+(y/n) **with a preview of the exact change** — the −/+ diff for an edit,
+new-file/overwrite disclosure for a write, edit counts for a rename apply.
+`/models` numbers downloadable models too: picking one hands the screen to
+ollama's progress bars, then switches to the model automatically. Ctrl+C
+cancels the running task without killing the session, ↑/↓/PgUp/PgDn
+scroll history. `--no-tui`
 keeps the plain line-based REPL (also used automatically when stdout is
 not a terminal). Assistant text **streams** as it is generated (Ollama,
 Anthropic, OpenAI). In either mode:

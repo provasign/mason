@@ -120,6 +120,33 @@ func bashTimeout() time.Duration {
 	return 5 * time.Minute
 }
 
+// diffSnippet renders a -/+ preview of a text replacement, capped so huge
+// edits do not flood the permission prompt.
+func diffSnippet(oldText, newText string) string {
+	const capLines = 40
+	var b strings.Builder
+	oldLines := strings.Split(strings.TrimRight(oldText, "\n"), "\n")
+	newLines := strings.Split(strings.TrimRight(newText, "\n"), "\n")
+	n := 0
+	for _, l := range oldLines {
+		if n >= capLines {
+			b.WriteString("  …\n")
+			break
+		}
+		b.WriteString("- " + l + "\n")
+		n++
+	}
+	for _, l := range newLines {
+		if n >= capLines*2 {
+			b.WriteString("  …\n")
+			break
+		}
+		b.WriteString("+ " + l + "\n")
+		n++
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // inRoot confines a model-supplied path to the project root. Symlinks and
 // ../ traversal cannot escape: the CLEANED absolute path must sit under root.
 func (s *Session) inRoot(rel string) (string, error) {
@@ -221,7 +248,7 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 		path, _ := call.Args["path"].(string)
 		oldText, _ := call.Args["old_text"].(string)
 		newText, _ := call.Args["new_text"].(string)
-		if !s.permit("edit " + path) {
+		if !s.permitDetail("edit "+path, diffSnippet(oldText, newText)) {
 			return "", fmt.Errorf("user denied edit of %s", path)
 		}
 		abs, aerr := s.inRoot(path)
@@ -249,12 +276,20 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 	case "write_file":
 		path, _ := call.Args["path"].(string)
 		content, _ := call.Args["content"].(string)
-		if !s.permit("write " + path) {
-			return "", fmt.Errorf("user denied write of %s", path)
-		}
 		abs, aerr := s.inRoot(path)
 		if aerr != nil {
 			return "", aerr
+		}
+		detail := fmt.Sprintf("(new file, %d bytes)", len(content))
+		if prev, err := os.ReadFile(abs); err == nil {
+			detail = fmt.Sprintf("(OVERWRITES existing file, %d → %d bytes)", len(prev), len(content))
+		}
+		head := content
+		if lines := strings.SplitN(head, "\n", 21); len(lines) > 20 {
+			head = strings.Join(lines[:20], "\n") + "\n  …"
+		}
+		if !s.permitDetail("write "+path, detail+"\n"+head) {
+			return "", fmt.Errorf("user denied write of %s", path)
 		}
 		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 			return "", err

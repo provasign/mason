@@ -16,6 +16,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/charmbracelet/glamour"
 	"github.com/peterh/liner"
 	"golang.org/x/term"
 
@@ -194,22 +195,28 @@ func run(args []string) int {
 		ui = tui.New()
 	}
 
-	permit := func(action string) bool {
+	permitDetail := func(action, detail string) bool {
 		if yes {
 			return true
 		}
 		if ui != nil {
-			return ui.Permit(action)
+			return ui.PermitDetail(action, detail)
 		}
 		if !interactive {
 			fmt.Fprintf(os.Stderr, "denied (non-interactive without --yes): %s\n", action)
 			return false
+		}
+		if detail != "" {
+			for _, l := range strings.Split(detail, "\n") {
+				fmt.Println("    " + l)
+			}
 		}
 		fmt.Printf("  allow? %s [y/N] ", action)
 		r := bufio.NewReader(os.Stdin)
 		ans, _ := r.ReadString('\n')
 		return strings.HasPrefix(strings.ToLower(strings.TrimSpace(ans)), "y")
 	}
+	permit := func(action string) bool { return permitDetail(action, "") }
 
 	ctxChars := 400_000
 	if strings.HasPrefix(model, "ollama:") || !strings.Contains(model, ":") {
@@ -222,12 +229,25 @@ func run(args []string) int {
 	}
 	colorOut := term.IsTerminal(int(os.Stdout.Fd()))
 	opts := agent.Options{
-		Root: root, MaxTurns: maxTurns, Permit: permit,
+		Root: root, MaxTurns: maxTurns, Permit: permit, PermitDetail: permitDetail,
 		ProjectNotes: projectNotes(root), CtxChars: ctxChars,
 		Stream: true, Color: colorOut, NewProvider: factory,
 	}
 	if ui != nil {
 		opts.Out = ui.Writer()
+		// In the TUI, complete replies render as markdown (glamour) — worth
+		// more than raw token streaming inside a viewport; the spinner and
+		// tool lines carry liveness. Line mode keeps true streaming.
+		opts.Stream = false
+		if r, err := glamour.NewTermRenderer(glamour.WithAutoStyle(), glamour.WithWordWrap(96)); err == nil {
+			opts.Render = func(text string) string {
+				out, rerr := r.Render(text)
+				if rerr != nil {
+					return text
+				}
+				return strings.TrimRight(out, "\n")
+			}
+		}
 	}
 	sess := agent.New(p, invoke, opts)
 	sessFile := sessionPath(root)

@@ -65,6 +65,8 @@ type Options struct {
 	CtxChars     int                      // history size that triggers auto-compaction (chars); default 400k
 	Stream       bool                     // stream assistant text as it arrives (providers that support it)
 	Color        bool                     // ANSI styling for the interactive terminal
+	Render       func(string) string      // optional final-text formatter (e.g. markdown → ANSI)
+	PermitDetail func(action, detail string) bool // permission gate WITH a preview (diffs); falls back to Permit
 	Depth        int                      // 0 = top-level; subagents run at 1 and cannot recurse
 	NewProvider  func(spec string) (provider.Provider, error) // for subagent model overrides
 }
@@ -213,6 +215,25 @@ func (s *Session) permit(action string) bool {
 	return s.opts.Permit(action)
 }
 
+// permitDetail gates an action while SHOWING the user what it will do —
+// the diff for an edit, the content head for a write, the counts for a
+// rename apply. Falls back to the plain gate when no detail handler is set.
+func (s *Session) permitDetail(action, detail string) bool {
+	if s.opts.PermitDetail != nil {
+		return s.opts.PermitDetail(action, detail)
+	}
+	return s.permit(action)
+}
+
+// renderFinal applies the optional formatter (markdown → ANSI in the TUI)
+// to a final assistant reply.
+func (s *Session) renderFinal(text string) string {
+	if s.opts.Render != nil {
+		return s.opts.Render(text)
+	}
+	return text
+}
+
 // Ask runs one user task to completion within the ongoing conversation and
 // returns the model's final text reply. Cancelling ctx stops cleanly after
 // the in-flight step: the conversation stays consistent for the next Ask.
@@ -284,7 +305,7 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 			}
 			s.msgs = append(s.msgs, reply)
 			if !shown {
-				fmt.Fprintf(s.out, "\n%s\n", text)
+				fmt.Fprintf(s.out, "\n%s\n", s.renderFinal(text))
 			}
 			// The task mutated the tree: delta-index so the NEXT question is
 			// answered from the current graph, not a stale one.
@@ -320,7 +341,7 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 		if text := strings.TrimSpace(reply.Content); text != "" {
 			s.msgs = append(s.msgs, provider.Msg{Role: "assistant", Content: text})
 			if !shown {
-				fmt.Fprintf(s.out, "\n%s\n", text)
+				fmt.Fprintf(s.out, "\n%s\n", s.renderFinal(text))
 			}
 			fmt.Fprintf(s.out, "%s\n", s.st.yellow("⚠ turn limit reached — verify the summary against the working tree"))
 			return text, nil
@@ -351,7 +372,16 @@ func (s *Session) dispatch(ctx context.Context, call provider.ToolCall, tr *trai
 			return "", fmt.Errorf("no rename_plan has been produced yet")
 		}
 		includeAmbiguous, _ := call.Args["includeAmbiguous"].(bool)
-		if !s.permit("apply rename plan to working tree") {
+		nEdits := len(asSlice(s.lastRenamePlan["edits"]))
+		nAmb := len(asSlice(s.lastRenamePlan["ambiguous"]))
+		detail := fmt.Sprintf("%d confirmed edit(s)", nEdits)
+		if includeAmbiguous {
+			detail += fmt.Sprintf(" + %d ambiguous", nAmb)
+		} else if nAmb > 0 {
+			detail += fmt.Sprintf(" (%d ambiguous NOT included)", nAmb)
+		}
+		detail += " — full plan listed above"
+		if !s.permitDetail("apply rename plan to working tree", detail) {
 			return "", fmt.Errorf("user denied apply")
 		}
 		applied, skipped, ambLeft, err := applyRenamePlan(s.out, s.root, s.lastRenamePlan, includeAmbiguous)

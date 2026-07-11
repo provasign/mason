@@ -452,3 +452,48 @@ func TestTurnExhaustionWrapsUp(t *testing.T) {
 		t.Fatalf("reply = %q", reply)
 	}
 }
+
+// The edit permission prompt must carry the -/+ diff of the exact change.
+func TestEditPermissionShowsDiff(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "a.go"), []byte("old line\n"), 0o644)
+	var gotAction, gotDetail string
+	s := New(&fakeProvider{}, nil, Options{Root: dir, Out: io.Discard,
+		PermitDetail: func(action, detail string) bool {
+			gotAction, gotDetail = action, detail
+			return false // deny, we only care about the preview
+		}})
+	_, err := s.runCodingTool(context.Background(), provider.ToolCall{Name: "edit_file",
+		Args: map[string]any{"path": "a.go", "old_text": "old line", "new_text": "new line"}})
+	if err == nil {
+		t.Fatal("denied edit must error")
+	}
+	if gotAction != "edit a.go" {
+		t.Fatalf("action = %q", gotAction)
+	}
+	if !strings.Contains(gotDetail, "- old line") || !strings.Contains(gotDetail, "+ new line") {
+		t.Fatalf("diff preview missing: %q", gotDetail)
+	}
+}
+
+// write_file must disclose overwrite vs new file in the preview.
+func TestWritePermissionDisclosesOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "exists.txt"), []byte("previous"), 0o644)
+	var details []string
+	s := New(&fakeProvider{}, nil, Options{Root: dir, Out: io.Discard,
+		PermitDetail: func(_, detail string) bool {
+			details = append(details, detail)
+			return true
+		}})
+	s.runCodingTool(context.Background(), provider.ToolCall{Name: "write_file",
+		Args: map[string]any{"path": "exists.txt", "content": "next"}})
+	s.runCodingTool(context.Background(), provider.ToolCall{Name: "write_file",
+		Args: map[string]any{"path": "fresh.txt", "content": "hello"}})
+	if !strings.Contains(details[0], "OVERWRITES") {
+		t.Fatalf("overwrite not disclosed: %q", details[0])
+	}
+	if !strings.Contains(details[1], "new file") {
+		t.Fatalf("new file not disclosed: %q", details[1])
+	}
+}
