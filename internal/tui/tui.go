@@ -31,7 +31,7 @@ type Config struct {
 	SwitchModel func(spec string) error
 	Usage       func() (in, out int, costUSD float64)
 	Savings     func() string // one-line ledger summary, "" if none
-	Compact     func() (before, after int, err error)
+	Compact     func(ctx context.Context) (before, after int, err error)
 	Clear       func()
 	SaveSession func()
 }
@@ -64,7 +64,13 @@ func (u *UI) PermitDetail(action, detail string) bool {
 type chanWriter struct{ ch chan tea.Msg }
 
 func (w *chanWriter) Write(b []byte) (int, error) {
-	w.ch <- chunkMsg(string(b))
+	// NEVER block the agent goroutine on UI backpressure: a blocked write
+	// here is invisible to the cancel context and makes Ctrl+C appear dead.
+	// Under pathological pressure a transcript chunk is dropped instead.
+	select {
+	case w.ch <- chunkMsg(string(b)):
+	default:
+	}
 	return len(b), nil
 }
 
@@ -374,13 +380,32 @@ keys: ↑/↓ PgUp/PgDn scroll · Ctrl+C cancels a running task
 		m.append("conversation cleared\n")
 		return m, nil
 	case "/compact":
-		before, after, err := m.cfg.Compact()
-		if err != nil {
-			m.append(errStyle.Render("compact: "+err.Error()) + "\n")
-		} else {
-			m.append(fmt.Sprintf("compacted %d → %d chars\n", before, after))
+		if m.busy {
+			m.append(errStyle.Render("a task is running — Ctrl+C first") + "\n")
+			return m, nil
 		}
-		return m, nil
+		// Compaction is a model call: run it as a cancellable busy op OFF
+		// the UI thread — synchronous compaction froze the whole TUI
+		// (including Ctrl+C) for the duration.
+		m.append("compacting…\n")
+		ctx, cancel := context.WithCancel(context.Background())
+		m.cancel = cancel
+		m.busy = true
+		events := m.ui.events
+		compact := m.cfg.Compact
+		go func() {
+			before, after, err := compact(ctx)
+			msg := fmt.Sprintf("compacted %d → %d chars\n", before, after)
+			if err != nil {
+				msg = "compact: " + err.Error() + "\n"
+			}
+			select {
+			case events <- chunkMsg(msg):
+			default:
+			}
+			events <- doneMsg{}
+		}()
+		return m, m.sp.Tick
 	case "/models":
 		st := localmodels.Detect()
 		ram := localmodels.SystemRAMGB()

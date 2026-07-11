@@ -379,7 +379,7 @@ func run(args []string) int {
 			fmt.Println("conversation cleared")
 			continue
 		case line == "/compact":
-			before, after, err := sess.Compact()
+			before, after, err := sess.Compact(context.Background())
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "compact:", err)
 			} else {

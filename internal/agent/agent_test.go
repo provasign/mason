@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/provasign/mason/internal/provider"
 )
@@ -263,7 +264,7 @@ func TestCompact(t *testing.T) {
 			provider.Msg{Role: "assistant", Content: strings.Repeat("y", 500)})
 	}
 	s.msgs = append(s.msgs, provider.Msg{Role: "tool", CallID: "1", Name: "grep", Content: "zzz"})
-	before, after, err := s.Compact()
+	before, after, err := s.Compact(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -525,5 +526,64 @@ func TestInterruptKeepsRoleAlternation(t *testing.T) {
 	}
 	if _, err := s.Ask(context.Background(), "explain"); err != nil {
 		t.Fatalf("session broken after interrupt: %v", err)
+	}
+}
+
+// A cancelled bash command must return promptly even when a GRANDCHILD
+// keeps the output pipe open (compilers, test binaries) — the classic
+// CombinedOutput hang that made Ctrl+C appear dead during builds.
+func TestBashCancelWithGrandchild(t *testing.T) {
+	s := New(&fakeProvider{}, nil, Options{Root: t.TempDir(), Out: io.Discard})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(500 * time.Millisecond); cancel() }()
+	t0 := time.Now()
+	_, err := s.runCodingTool(ctx, provider.ToolCall{Name: "bash",
+		Args: map[string]any{"command": "sleep 60 & echo started; wait"}})
+	elapsed := time.Since(t0)
+	_ = err
+	if elapsed > 10*time.Second {
+		t.Fatalf("cancelled bash with grandchild took %v — pipe hang not fixed", elapsed)
+	}
+}
+
+// Auto-compaction must honor the cancel context — an uncancellable model
+// call at Ask start makes Ctrl+C appear completely dead.
+func TestCompactHonorsCancel(t *testing.T) {
+	blocked := &blockingProvider{unblock: make(chan struct{})}
+	s := New(blocked, nil, Options{Root: t.TempDir(), Out: io.Discard, CtxChars: 10})
+	for i := 0; i < 8; i++ {
+		s.msgs = append(s.msgs,
+			provider.Msg{Role: "user", Content: strings.Repeat("x", 100)},
+			provider.Msg{Role: "assistant", Content: strings.Repeat("y", 100)})
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.Ask(ctx, "next task triggers auto-compact")
+		done <- err
+	}()
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "interrupted") {
+			t.Fatalf("want interrupted, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Ask still blocked in compaction after cancel")
+	}
+	close(blocked.unblock)
+}
+
+// blockingProvider blocks in Chat until ctx cancels or unblock closes.
+type blockingProvider struct{ unblock chan struct{} }
+
+func (b *blockingProvider) Name() string { return "blocking" }
+func (b *blockingProvider) Chat(ctx context.Context, _ []provider.Msg, _ []provider.ToolDef, _ bool) (provider.Msg, error) {
+	select {
+	case <-ctx.Done():
+		return provider.Msg{}, ctx.Err()
+	case <-b.unblock:
+		return provider.Msg{Role: "assistant", Content: "ok"}, nil
 	}
 }

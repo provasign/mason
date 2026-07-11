@@ -170,8 +170,10 @@ func (s *Session) historyChars() int {
 }
 
 // Compact summarizes everything but the last few messages into one message,
-// preserving the system prompt. Returns the chars before/after.
-func (s *Session) Compact() (before, after int, err error) {
+// preserving the system prompt. Returns the chars before/after. Honors ctx —
+// compaction is a model call and can take minutes on a loaded machine, and
+// an uncancellable compaction makes Ctrl+C appear completely dead.
+func (s *Session) Compact(ctx context.Context) (before, after int, err error) {
 	before = s.historyChars()
 	if len(s.msgs) < 6 {
 		return before, before, nil
@@ -185,7 +187,7 @@ func (s *Session) Compact() (before, after int, err error) {
 			fmt.Fprintf(&b, "[%s called %s]\n", m.Role, c.Name)
 		}
 	}
-	reply, cerr := s.provider.Chat(context.Background(), []provider.Msg{
+	reply, cerr := s.provider.Chat(ctx, []provider.Msg{
 		{Role: "system", Content: "You compact coding-session history. Output ONLY a dense summary: the task(s), decisions made, files read/changed, verification results, and open items. No preamble."},
 		{Role: "user", Content: b.String()},
 	}, nil, false)
@@ -266,8 +268,11 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 	startFP := treeFingerprint(s.root)
 
 	if s.historyChars() > s.opts.CtxChars {
-		if before, after, err := s.Compact(); err == nil && after < before {
+		fmt.Fprintf(s.out, "  ⋯ compacting history…\n")
+		if before, after, err := s.Compact(ctx); err == nil && after < before {
 			fmt.Fprintf(s.out, "  ⋯ auto-compacted history %d → %d chars\n", before, after)
+		} else if ctx.Err() != nil {
+			return "", s.interrupted()
 		}
 	}
 
