@@ -44,18 +44,23 @@ func Wizard(interactive bool) (string, error) {
 		fmt.Println("\nThis machine: memory unknown — sizes shown, nothing filtered")
 	}
 
+	// One continuous numbered list: installed models select instantly,
+	// catalog models download then select.
+	num := 0
 	if len(st.Installed) > 0 {
-		fmt.Println("\nInstalled and ready:")
+		fmt.Println("\nInstalled — press its number to use it:")
 		for _, t := range st.Installed {
-			mark := "  ✓ " + t
+			num++
+			mark := ""
 			for _, c := range Catalog {
 				if c.Tag == t && c.Blessed {
-					mark += "   (recommended — measured at the engine ceiling)"
+					mark = "   (recommended — measured at the engine ceiling)"
 				}
 			}
-			fmt.Println(mark)
+			fmt.Printf("  %d. ✓ %s%s\n", num, t, mark)
 		}
 	}
+	nInstalled := num
 
 	var runnable []Model
 	var tooBig []Model
@@ -72,13 +77,14 @@ func Wizard(interactive bool) (string, error) {
 
 	if len(runnable) > 0 {
 		fmt.Println("\nAvailable to download (fits this machine):")
-		for i, m := range runnable {
+		for _, m := range runnable {
+			num++
 			star := ""
 			if m.Blessed {
 				star = " ★"
 			}
 			fmt.Printf("  %d. %-22s %4.1f GB download · needs %2d GB%s — %s\n",
-				i+1, m.Tag, m.DownloadGB, m.MinRAMGB, star, m.Note)
+				num, m.Tag, m.DownloadGB, m.MinRAMGB, star, m.Note)
 		}
 	}
 	if len(tooBig) > 0 {
@@ -88,16 +94,20 @@ func Wizard(interactive bool) (string, error) {
 		}
 	}
 
-	if !interactive || len(runnable) == 0 {
+	if !interactive || num == 0 {
 		return "", nil
 	}
-	fmt.Print("\nPress a number to download (Enter to skip): ")
+	fmt.Print("\nPress a number to use or download (Enter to skip): ")
 	line := readLine()
 	n, err := strconv.Atoi(strings.TrimSpace(line))
-	if err != nil || n < 1 || n > len(runnable) {
+	if err != nil || n < 1 || n > num {
 		return "", nil
 	}
-	pick := runnable[n-1]
+	if n <= nInstalled {
+		// Installed pick: instant switch, nothing to download.
+		return "ollama:" + st.Installed[n-1], nil
+	}
+	pick := runnable[n-1-nInstalled]
 	fmt.Printf("downloading %s (%.1f GB)…\n", pick.Tag, pick.DownloadGB)
 	if err := Pull(pick.Tag); err != nil {
 		return "", fmt.Errorf("download failed: %w", err)
