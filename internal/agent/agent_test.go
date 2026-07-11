@@ -241,13 +241,21 @@ func TestHonestyGuard(t *testing.T) {
 	}
 }
 
-// A read-only task must not trigger the guard.
+// A read-only task must not trigger the MUTATION guard — but since it asks
+// about the repository, the GROUNDING guard bounces the toolless first
+// answer once and then accepts (with a visible flag).
 func TestHonestyGuardSkipsReadOnly(t *testing.T) {
-	fp := &fakeProvider{replies: []provider.Msg{{Role: "assistant", Content: "it does X"}}}
+	fp := &fakeProvider{replies: []provider.Msg{
+		{Role: "assistant", Content: "it does X"},
+		{Role: "assistant", Content: "it does X, honestly"},
+	}}
 	s := New(fp, nil, Options{Root: t.TempDir(), Out: io.Discard})
 	reply, err := s.Ask(context.Background(), "explain what this repository does")
-	if err != nil || reply != "it does X" {
-		t.Fatalf("read-only reply rejected: %q %v", reply, err)
+	if err != nil || reply != "it does X, honestly" {
+		t.Fatalf("reply = %q err=%v", reply, err)
+	}
+	if len(fp.turns) != 2 {
+		t.Fatalf("expected 1 grounding bounce (2 turns), got %d", len(fp.turns))
 	}
 }
 
@@ -585,5 +593,110 @@ func (b *blockingProvider) Chat(ctx context.Context, _ []provider.Msg, _ []provi
 		return provider.Msg{}, ctx.Err()
 	case <-b.unblock:
 		return provider.Msg{Role: "assistant", Content: "ok"}, nil
+	}
+}
+
+// A refusal ("I don't have enough information / could you provide") given
+// with ZERO tool calls must be bounced back once, not accepted.
+func TestRefusalGuard(t *testing.T) {
+	fp := &fakeProvider{replies: []provider.Msg{
+		{Role: "assistant", Content: "I'm sorry, but I don't have enough information to determine what main does. Could you please provide more details?"},
+		{Role: "assistant", Calls: []provider.ToolCall{{ID: "1", Name: "read_file",
+			Args: map[string]any{"path": "main.py"}}}},
+		{Role: "assistant", Content: "main.py prints hello"},
+	}}
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.py"), []byte("print('hello')\n"), 0o644)
+	invoke := func(tool string, args map[string]any) (any, error) {
+		return map[string]any{"content": "print('hello')"}, nil
+	}
+	s := New(fp, invoke, Options{Root: dir, Out: io.Discard})
+	reply, err := s.Ask(context.Background(), "explain the project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reply, "prints hello") {
+		t.Fatalf("refusal was accepted instead of bounced: %q", reply)
+	}
+}
+
+// An honest answer after tools ran must NOT be bounced even if it contains
+// refusal-like wording.
+func TestRefusalGuardSkipsAfterTools(t *testing.T) {
+	fp := &fakeProvider{replies: []provider.Msg{
+		{Role: "assistant", Calls: []provider.ToolCall{{ID: "1", Name: "grep",
+			Args: map[string]any{"pattern": "nonexistent"}}}},
+		{Role: "assistant", Content: "I checked with grep and cannot determine the author — it is not recorded in the repository."},
+	}}
+	s := New(fp, nil, Options{Root: t.TempDir(), Out: io.Discard})
+	reply, err := s.Ask(context.Background(), "who wrote this originally?")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reply, "not recorded") {
+		t.Fatalf("honest post-tool answer was bounced: %q", reply)
+	}
+}
+
+// A question naming an existing file must force a tool call on turn 0.
+func TestFileMentionWall(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.py"), []byte("x"), 0o644)
+	fp := &fakeProvider{replies: []provider.Msg{{Role: "assistant", Content: "it prints"}}}
+	s := New(fp, nil, Options{Root: dir, Out: io.Discard})
+	if _, err := s.Ask(context.Background(), "What does main.py do"); err != nil {
+		t.Fatal(err)
+	}
+	if !fp.turns[0].forced {
+		t.Fatal("file-mention question must force a tool call on turn 0")
+	}
+	seeded := false
+	for _, m := range s.History() {
+		if strings.Contains(m.Content, "mason attached main.py") {
+			seeded = true
+		}
+	}
+	if !seeded {
+		t.Fatal("mentioned file content was not pre-seeded into context")
+	}
+	// No such file → no wall.
+	fp2 := &fakeProvider{replies: []provider.Msg{{Role: "assistant", Content: "hi"}}}
+	s2 := New(fp2, nil, Options{Root: dir, Out: io.Discard})
+	s2.Ask(context.Background(), "What does nothere.py do")
+	if fp2.turns[0].forced {
+		t.Fatal("nonexistent file must not force")
+	}
+}
+
+// A repo question answered with zero tools must be bounced to the tools;
+// if the model insists, the answer is accepted but visibly flagged.
+func TestGroundingGuard(t *testing.T) {
+	fp := &fakeProvider{replies: []provider.Msg{
+		{Role: "assistant", Content: "This project is a large-scale multi-language data platform."}, // fabrication
+		{Role: "assistant", Calls: []provider.ToolCall{{ID: "1", Name: "list_files", Args: map[string]any{}}}},
+		{Role: "assistant", Content: "A small Python demo with one module and one test."},
+	}}
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "main.py"), []byte("print(1)\n"), 0o644)
+	s := New(fp, nil, Options{Root: dir, Out: io.Discard})
+	reply, err := s.Ask(context.Background(), "Describe the current project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reply, "Python demo") {
+		t.Fatalf("fabricated description accepted: %q", reply)
+	}
+}
+
+// General-knowledge questions must NOT be bounced.
+func TestGroundingGuardSkipsGeneralQuestions(t *testing.T) {
+	fp := &fakeProvider{replies: []provider.Msg{{Role: "assistant", Content: "A goroutine is a lightweight thread."}}}
+	s := New(fp, nil, Options{Root: t.TempDir(), Out: io.Discard})
+	reply, err := s.Ask(context.Background(), "what is a goroutine")
+	if err != nil || !strings.Contains(reply, "lightweight") {
+		t.Fatalf("general question bounced: %q %v", reply, err)
+	}
+	if len(fp.turns) != 1 {
+		t.Fatalf("expected exactly one turn, got %d", len(fp.turns))
 	}
 }

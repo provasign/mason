@@ -14,6 +14,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -42,6 +43,9 @@ Working style:
 - After code changes, verify with the project's build or tests via bash.
 - Files change ONLY through edit_file, write_file, apply_rename_plan, or a
   bash command. Never claim a change you did not make with a tool call.
+- NEVER ask the user for information you can obtain yourself: the repository
+  is in front of you — list_files, read_file, and grep answer questions
+  about the project. Read first, then answer.
 - When the task is done, reply in plain text (no tool call) with a short
   summary of what changed and how it was verified.`
 
@@ -49,6 +53,17 @@ Working style:
 // the first model turn is walled onto the graph tools (invocation wall) so
 // routing cannot wander into text search.
 var graphIntent = regexp.MustCompile(`(?i)\b(rename|callers?\b|call sites?|change[- ]impact|signature|deprecat|every (site|place|caller|usage)|all (sites|places|callers|usages)|who (implements|breaks)|missing implementation|untested|dead code|unused (code|symbols|functions))`)
+
+// refusal detects the lazy-model failure: answering "I don't have enough
+// information / could you provide the code" when the repository — and the
+// tools to read it — are right there. Fired only when ZERO tools ran during
+// the task, so honest "I looked and can't tell" answers pass through.
+var refusal = regexp.MustCompile(`(?i)(don'?t|do not|doesn'?t|cannot|can'?t) have (enough|sufficient|access)|without (being provided|seeing|access)|would need (to see|access|more|the)|(if you (can|could) |please |could you )(share|provide|give)|i (cannot|can'?t) (determine|describe|tell|see|access)|need more (information|context|details)`)
+
+// repoIntent detects questions ABOUT the repository — those answers must be
+// grounded in tool output, not the model's imagination (measured: a 3B
+// invented a whole multi-language data platform for a 3-file Python demo).
+var repoIntent = regexp.MustCompile(`(?i)\b(th(is|e)|current|our) +(project|repo(sitory)?|codebase|code base|app(lication)?|package|module)\b|\bin (this|the) (code|repo|project)\b`)
 
 // mutationIntent detects tasks that ask for a change to the tree. If such a
 // task ends with NO mutating tool having run, the final summary is a
@@ -265,7 +280,27 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 	wall := s.invoke != nil && graphIntent.MatchString(task)
 	s.mutated = false
 	nudged := false
+	refusalNudged := false
+	groundingNudged := false
+	toolsRan := 0
 	startFP := treeFingerprint(s.root)
+
+	// A task that names existing files gets their content ATTACHED by the
+	// harness before the first model turn: weak models refuse to call
+	// read_file ("could you share the code?") and Ollama's forced tool
+	// choice is best-effort — deterministic pre-seeding removes the model
+	// from that loop entirely.
+	wallAny := false
+	if mentioned := s.filesMentioned(task); len(mentioned) > 0 {
+		wallAny = true
+		for _, rel := range mentioned {
+			if content := s.readForContext(rel); content != "" {
+				fmt.Fprintf(s.out, "  %s\n", s.st.dim("· attached "+rel))
+				s.msgs = append(s.msgs, provider.Msg{Role: "user",
+					Content: "[mason attached " + rel + ", which the task mentions]\n" + content})
+			}
+		}
+	}
 
 	if s.historyChars() > s.opts.CtxChars {
 		fmt.Fprintf(s.out, "  ⋯ compacting history…\n")
@@ -287,6 +322,8 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 		var err error
 		if wall && turn == 0 {
 			reply, shown, err = s.chat(ctx, graphOnly, true)
+		} else if wallAny && turn == 0 {
+			reply, shown, err = s.chat(ctx, tools, true)
 		} else {
 			reply, shown, err = s.chat(ctx, tools, false)
 		}
@@ -308,6 +345,30 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 				s.msgs = append(s.msgs, reply, provider.Msg{Role: "user",
 					Content: "Continue: call a tool, or reply with your final summary."})
 				continue
+			}
+			// Refusal guard: the model asked the USER for information while
+			// having used none of its tools — bounce it back once.
+			if toolsRan == 0 && refusal.MatchString(text) && !refusalNudged {
+				refusalNudged = true
+				s.msgs = append(s.msgs, reply, provider.Msg{Role: "user",
+					Content: "Do not ask me — you have tools. Use list_files, read_file, and " +
+						"grep to answer from the repository itself, then give the answer. " +
+						"Only if the repository truly cannot answer it, say exactly what you checked."})
+				continue
+			}
+			// Grounding guard: a question about the repository answered with
+			// ZERO tool calls is imagination, not inspection. Bounce once;
+			// flag visibly if the model insists.
+			if toolsRan == 0 && !wallAny && repoIntent.MatchString(task) {
+				if !groundingNudged {
+					groundingNudged = true
+					s.msgs = append(s.msgs, reply, provider.Msg{Role: "user",
+						Content: "You used no tools — that answer cannot be grounded in this " +
+							"repository. Use list_files and read_file to inspect it, then " +
+							"answer from what you actually find. Do not invent details."})
+					continue
+				}
+				fmt.Fprintf(s.out, "\n%s\n", s.st.yellow("⚠ mason: this answer used no tools — it may not reflect the actual repository"))
 			}
 			// Honesty guard: a change was requested but the tree is untouched —
 			// the summary would be a fabrication. Reject once, demand the tool.
@@ -336,6 +397,7 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 		s.msgs = append(s.msgs, reply)
 
 		for _, call := range reply.Calls {
+			toolsRan++
 			result, isErr := s.dispatch(ctx, call, tr)
 			content := result
 			if isErr != nil {
@@ -482,6 +544,86 @@ func compactArgs(args map[string]any) string {
 		parts = append(parts, k+"="+sv)
 	}
 	return strings.Join(parts, " ")
+}
+
+// filesMentioned resolves file names the task refers to — exact paths
+// first, then basename search anywhere in the repo (bounded) so "what does
+// main.py do" finds src/main.py. Returns repo-relative paths, max 3.
+func (s *Session) filesMentioned(task string) []string {
+	var out []string
+	var names []string
+	for _, w := range strings.Fields(task) {
+		w = strings.Trim(w, `"'.,;:()?!`+"`")
+		if !strings.Contains(w, ".") || strings.Contains(w, "..") {
+			continue
+		}
+		if abs, err := s.inRoot(w); err == nil {
+			if fi, err := os.Stat(abs); err == nil && !fi.IsDir() {
+				if rel, err := filepath.Rel(s.root, abs); err == nil {
+					out = append(out, rel)
+					continue
+				}
+			}
+		}
+		names = append(names, filepath.Base(w))
+	}
+	if len(names) > 0 {
+		want := map[string]bool{}
+		for _, n := range names {
+			want[n] = true
+		}
+		seen := 0
+		_ = filepath.WalkDir(s.root, func(p string, d os.DirEntry, err error) error {
+			if err != nil || len(want) == 0 {
+				return filepath.SkipAll
+			}
+			if d.IsDir() {
+				switch d.Name() {
+				case ".git", ".grove", "node_modules", "vendor":
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			seen++
+			if seen > 20000 {
+				return filepath.SkipAll
+			}
+			if want[d.Name()] {
+				delete(want, d.Name())
+				if rel, err := filepath.Rel(s.root, p); err == nil {
+					out = append(out, rel)
+				}
+			}
+			return nil
+		})
+	}
+	if len(out) > 3 {
+		out = out[:3]
+	}
+	return out
+}
+
+// readForContext fetches a file for pre-seeding: through prism_read when
+// the engine is up (ledgered, SHA-deduped), plain read otherwise. Capped.
+func (s *Session) readForContext(rel string) string {
+	if s.invoke != nil {
+		if res, err := s.invoke("prism_read", map[string]any{"file": rel}); err == nil {
+			if m, ok := res.(map[string]any); ok {
+				if c, _ := m["content"].(string); c != "" {
+					return truncate(c, maxToolOutput)
+				}
+			}
+		}
+	}
+	abs, err := s.inRoot(rel)
+	if err != nil {
+		return ""
+	}
+	b, err := os.ReadFile(abs)
+	if err != nil {
+		return ""
+	}
+	return truncate(string(b), maxToolOutput)
 }
 
 // treeFingerprint captures the working tree's change state (tracked mods +
