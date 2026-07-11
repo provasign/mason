@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/provasign/mason/internal/provider"
@@ -315,17 +314,11 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 		defer cancel()
 		cmd := exec.CommandContext(cctx, "sh", "-c", command)
 		cmd.Dir = s.root
-		// Kill the whole process GROUP on cancel, and force Wait to return
-		// even if grandchildren keep the output pipe open — otherwise
-		// cancelling during `go build`/`go test` hangs on compiler children
-		// that inherited the pipe, and Ctrl+C appears dead.
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Cancel = func() error {
-			if cmd.Process != nil {
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-			}
-			return nil
-		}
+		// Kill the whole process GROUP on cancel (platform-specific), and
+		// force Wait to return even if grandchildren keep the output pipe
+		// open — otherwise cancelling during `go build`/`go test` hangs on
+		// compiler children that inherited the pipe, and Ctrl+C appears dead.
+		configureBashCancel(cmd)
 		cmd.WaitDelay = 5 * time.Second
 		out, err := cmd.CombinedOutput()
 		res := truncate(string(out), maxToolOutput)
