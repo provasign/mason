@@ -62,6 +62,10 @@ type Options struct {
 	Permit       func(action string) bool // gate for bash/edit/write; nil = allow
 	ProjectNotes string                   // AGENTS.md/MASON.md content appended to the system prompt
 	CtxChars     int                      // history size that triggers auto-compaction (chars); default 400k
+	Stream       bool                     // stream assistant text as it arrives (providers that support it)
+	Color        bool                     // ANSI styling for the interactive terminal
+	Depth        int                      // 0 = top-level; subagents run at 1 and cannot recurse
+	NewProvider  func(spec string) (provider.Provider, error) // for subagent model overrides
 }
 
 // Session is one conversation against one repository.
@@ -74,9 +78,10 @@ type Session struct {
 	msgs     []provider.Msg
 
 	lastRenamePlan map[string]any
-	mutated        bool // any mutating tool ran during the current Ask
-	usageIn        int  // session-total input tokens
-	usageOut       int  // session-total output tokens
+	mutated        bool  // any mutating tool ran during the current Ask
+	usageIn        int   // session-total input tokens
+	usageOut       int   // session-total output tokens
+	st             style // terminal styling
 }
 
 func New(p provider.Provider, invoke Invoker, opts Options) *Session {
@@ -99,8 +104,33 @@ func New(p provider.Provider, invoke Invoker, opts Options) *Session {
 		root:     opts.Root,
 		out:      opts.Out,
 		opts:     opts,
+		st:       style{on: opts.Color},
 		msgs:     []provider.Msg{{Role: "system", Content: sys}},
 	}
+}
+
+// chat runs one model turn, streaming text to the terminal when the provider
+// supports it. Returns the reply and whether its text already reached the
+// screen (so callers don't print it twice).
+func (s *Session) chat(tools []provider.ToolDef, force bool) (provider.Msg, bool, error) {
+	if s.opts.Stream {
+		if str, ok := s.provider.(provider.Streamer); ok {
+			shown := false
+			reply, err := str.ChatStream(s.msgs, tools, force, func(delta string) {
+				if !shown {
+					fmt.Fprintln(s.out)
+					shown = true
+				}
+				fmt.Fprint(s.out, delta)
+			})
+			if shown {
+				fmt.Fprintln(s.out)
+			}
+			return reply, shown, err
+		}
+	}
+	reply, err := s.provider.Chat(s.msgs, tools, force)
+	return reply, false, err
 }
 
 // SetProvider switches the model mid-session; the conversation carries over.
@@ -206,11 +236,12 @@ func (s *Session) Ask(task string) (string, error) {
 		// Invocation wall: a graph-shaped task's FIRST turn sees only the
 		// graph tools and must call one. After that the full set opens up.
 		var reply provider.Msg
+		var shown bool
 		var err error
 		if wall && turn == 0 {
-			reply, err = s.provider.Chat(s.msgs, graphOnly, true)
+			reply, shown, err = s.chat(graphOnly, true)
 		} else {
-			reply, err = s.provider.Chat(s.msgs, tools, false)
+			reply, shown, err = s.chat(tools, false)
 		}
 		if err != nil {
 			return "", fmt.Errorf("%s: %w", s.provider.Name(), err)
@@ -238,9 +269,12 @@ func (s *Session) Ask(task string) (string, error) {
 							"If no change is actually needed, say so explicitly instead of claiming one."})
 					continue
 				}
-				fmt.Fprintf(s.out, "\n⚠ mason: this task asked for a change but no file was modified\n")
+				fmt.Fprintf(s.out, "\n%s\n", s.st.yellow("⚠ mason: this task asked for a change but no file was modified"))
 			}
 			s.msgs = append(s.msgs, reply)
+			if !shown {
+				fmt.Fprintf(s.out, "\n%s\n", text)
+			}
 			// The task mutated the tree: delta-index so the NEXT question is
 			// answered from the current graph, not a stale one.
 			if s.invoke != nil && s.treeChanged(startFP) {
@@ -268,7 +302,7 @@ func (s *Session) Ask(task string) (string, error) {
 // coding tools return content to the model.
 func (s *Session) dispatch(call provider.ToolCall, tr *trail.Trail) (string, error) {
 	if _, ok := graphOps[call.Name]; ok {
-		fmt.Fprintf(s.out, "  ◆ %s %v\n", call.Name, compactArgs(call.Args))
+		fmt.Fprintf(s.out, "  %s\n", s.st.cyan("◆ "+call.Name+" "+compactArgs(call.Args)))
 		meta, full, err := runGraphOp(call, s.invoke)
 		if err != nil {
 			return "", err
@@ -297,10 +331,55 @@ func (s *Session) dispatch(call provider.ToolCall, tr *trail.Trail) (string, err
 		return "rename plan applied; now verify with the project's build or tests", nil
 	}
 
+	if call.Name == "subagent" {
+		return s.runSubagent(call, tr)
+	}
+
 	if call.Name != "bash" && call.Name != "edit_file" && call.Name != "write_file" {
-		fmt.Fprintf(s.out, "  · %s %v\n", call.Name, compactArgs(call.Args))
+		fmt.Fprintf(s.out, "  %s\n", s.st.dim("· "+call.Name+" "+compactArgs(call.Args)))
 	}
 	return s.runCodingTool(call)
+}
+
+// runSubagent delegates a subtask to a fresh Session with an EMPTY context:
+// its reads and tool traffic never enter the parent's context — only its
+// final summary returns. Depth-limited to one level.
+func (s *Session) runSubagent(call provider.ToolCall, tr *trail.Trail) (string, error) {
+	if s.opts.Depth > 0 {
+		return "", fmt.Errorf("subagents cannot spawn subagents — do this work yourself")
+	}
+	task, _ := call.Args["task"].(string)
+	if strings.TrimSpace(task) == "" {
+		return "", fmt.Errorf("subagent needs a task")
+	}
+	p := s.provider
+	if spec, _ := call.Args["model"].(string); spec != "" && s.opts.NewProvider != nil {
+		np, err := s.opts.NewProvider(spec)
+		if err != nil {
+			return "", fmt.Errorf("subagent model %q: %w", spec, err)
+		}
+		p = np
+	}
+	fmt.Fprintf(s.out, "  %s\n", s.st.cyan("⑂ subagent: "+truncate(task, 100)))
+	sub := New(p, s.invoke, Options{
+		Root: s.root,
+		Out:  &prefixWriter{w: s.out, prefix: "  │ "},
+		// Half the parent budget: a runaway subagent must not eat the session.
+		MaxTurns: s.opts.MaxTurns / 2,
+		Permit:   s.opts.Permit,
+		CtxChars: s.opts.CtxChars,
+		Color:    s.opts.Color,
+		Depth:    s.opts.Depth + 1,
+	})
+	reply, err := sub.Ask(task)
+	in, out := sub.Usage()
+	s.usageIn += in
+	s.usageOut += out
+	if err != nil {
+		return "", fmt.Errorf("subagent: %w", err)
+	}
+	tr.Note("subagent done: %s", truncate(task, 120))
+	return truncate(reply, maxToolOutput), nil
 }
 
 // compactArgs renders tool args for the status line without dumping content.

@@ -297,3 +297,58 @@ func TestSetHistory(t *testing.T) {
 		t.Fatalf("history restore wrong: %+v", s.msgs)
 	}
 }
+
+// Subagent: isolated context (its reads never enter the parent history),
+// only the summary returns; usage rolls up; depth is capped at one level.
+func TestSubagent(t *testing.T) {
+	fp := &fakeProvider{replies: []provider.Msg{
+		// parent delegates
+		{Role: "assistant", Calls: []provider.ToolCall{{ID: "1", Name: "subagent",
+			Args: map[string]any{"task": "survey the config loading code"}}}},
+		// subagent reads a file, then summarizes
+		{Role: "assistant", Usage: &provider.Usage{In: 100, Out: 10},
+			Calls: []provider.ToolCall{{ID: "s1", Name: "read_file", Args: map[string]any{"path": "cfg.go"}}}},
+		{Role: "assistant", Usage: &provider.Usage{In: 200, Out: 20}, Content: "sub summary DONE"},
+		// parent concludes
+		{Role: "assistant", Content: "parent final"},
+	}}
+	invoke := func(tool string, args map[string]any) (any, error) {
+		if tool == "prism_read" {
+			return map[string]any{"content": "SECRETDATA func LoadConfig() {}"}, nil
+		}
+		return map[string]any{}, nil
+	}
+	s := New(fp, invoke, Options{Root: t.TempDir(), Out: io.Discard, MaxTurns: 10})
+	reply, err := s.Ask("survey the repository configuration")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "parent final" {
+		t.Fatalf("reply = %q", reply)
+	}
+	var sawSummary bool
+	for _, m := range s.History() {
+		if strings.Contains(m.Content, "SECRETDATA") {
+			t.Fatal("subagent's raw read leaked into parent context")
+		}
+		if m.Role == "tool" && strings.Contains(m.Content, "sub summary DONE") {
+			sawSummary = true
+		}
+	}
+	if !sawSummary {
+		t.Fatal("subagent summary did not return to parent")
+	}
+	in, out := s.Usage()
+	if in != 300 || out != 30 {
+		t.Fatalf("subagent usage not rolled up: %d/%d", in, out)
+	}
+}
+
+func TestSubagentDepthGuard(t *testing.T) {
+	s := New(&fakeProvider{}, nil, Options{Root: t.TempDir(), Out: io.Discard, Depth: 1, MaxTurns: 10})
+	_, err := s.runSubagent(provider.ToolCall{Name: "subagent",
+		Args: map[string]any{"task": "recurse"}}, nil)
+	if err == nil || !strings.Contains(err.Error(), "cannot spawn") {
+		t.Fatalf("depth guard missing: %v", err)
+	}
+}

@@ -58,6 +58,10 @@ func toolDefs() []provider.ToolDef {
 			Parameters: obj(map[string]any{"path": str("file path"), "content": str("full file content")}, "path", "content")},
 		{Name: "bash", Description: "Run a shell command in the project root (build, test, git). Output is truncated.",
 			Parameters: obj(map[string]any{"command": str("shell command")}, "command")},
+		{Name: "subagent", Description: "Delegate a self-contained subtask (broad exploration, multi-file survey, isolated analysis or change) to a fresh agent with its own empty context and the same tools. Only its final summary returns to you — its intermediate reads never consume your context. Use for work whose raw output would be large.",
+			Parameters: obj(map[string]any{
+				"task":  str("complete, self-contained instructions for the subagent"),
+				"model": str("optional model override, e.g. ollama:qwen2.5-coder:14b for cheap exploration")}, "task")},
 	}
 }
 

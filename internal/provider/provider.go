@@ -164,7 +164,7 @@ type ollamaProvider struct {
 
 func (p *ollamaProvider) Name() string { return "ollama:" + p.model }
 
-func (p *ollamaProvider) Chat(msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error) {
+func (p *ollamaProvider) payload(msgs []Msg, tools []ToolDef, forceTools bool) map[string]any {
 	messages := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
 		mm := map[string]any{"role": m.Role, "content": m.Content}
@@ -195,7 +195,11 @@ func (p *ollamaProvider) Chat(msgs []Msg, tools []ToolDef, forceTools bool) (Msg
 	if forceTools {
 		payload["tool_choice"] = "required"
 	}
-	raw, err := postJSON(p.url+"/api/chat", nil, payload)
+	return payload
+}
+
+func (p *ollamaProvider) Chat(msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error) {
+	raw, err := postJSON(p.url+"/api/chat", nil, p.payload(msgs, tools, forceTools))
 	if err != nil {
 		return Msg{}, err
 	}
@@ -292,11 +296,19 @@ func parseContentToolCall(content string, tools []ToolDef) *ToolCall {
 type anthropicProvider struct {
 	model string
 	key   string
+	url   string // base URL, overridable for tests
+}
+
+func (p *anthropicProvider) base() string {
+	if p.url != "" {
+		return p.url
+	}
+	return "https://api.anthropic.com"
 }
 
 func (p *anthropicProvider) Name() string { return "claude:" + p.model }
 
-func (p *anthropicProvider) Chat(msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error) {
+func (p *anthropicProvider) payload(msgs []Msg, tools []ToolDef, forceTools bool) map[string]any {
 	var system string
 	var messages []map[string]any
 	for _, m := range msgs {
@@ -344,9 +356,13 @@ func (p *anthropicProvider) Chat(msgs []Msg, tools []ToolDef, forceTools bool) (
 	if forceTools {
 		payload["tool_choice"] = map[string]any{"type": "any"}
 	}
-	raw, err := postJSON("https://api.anthropic.com/v1/messages", map[string]string{
+	return payload
+}
+
+func (p *anthropicProvider) Chat(msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error) {
+	raw, err := postJSON(p.base()+"/v1/messages", map[string]string{
 		"x-api-key": p.key, "anthropic-version": "2023-06-01",
-	}, payload)
+	}, p.payload(msgs, tools, forceTools))
 	if err != nil {
 		return Msg{}, scrub(err, p.key)
 	}
@@ -384,11 +400,19 @@ func (p *anthropicProvider) Chat(msgs []Msg, tools []ToolDef, forceTools bool) (
 type openaiProvider struct {
 	model string
 	key   string
+	url   string // base URL, overridable for tests
+}
+
+func (p *openaiProvider) base() string {
+	if p.url != "" {
+		return p.url
+	}
+	return "https://api.openai.com"
 }
 
 func (p *openaiProvider) Name() string { return "openai:" + p.model }
 
-func (p *openaiProvider) Chat(msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error) {
+func (p *openaiProvider) payload(msgs []Msg, tools []ToolDef, forceTools bool) map[string]any {
 	var messages []map[string]any
 	for _, m := range msgs {
 		switch m.Role {
@@ -427,9 +451,13 @@ func (p *openaiProvider) Chat(msgs []Msg, tools []ToolDef, forceTools bool) (Msg
 	if forceTools {
 		payload["tool_choice"] = "required"
 	}
-	raw, err := postJSON("https://api.openai.com/v1/chat/completions", map[string]string{
+	return payload
+}
+
+func (p *openaiProvider) Chat(msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error) {
+	raw, err := postJSON(p.base()+"/v1/chat/completions", map[string]string{
 		"Authorization": "Bearer " + p.key,
-	}, payload)
+	}, p.payload(msgs, tools, forceTools))
 	if err != nil {
 		return Msg{}, scrub(err, p.key)
 	}

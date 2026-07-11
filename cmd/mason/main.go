@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/peterh/liner"
 	"golang.org/x/term"
 
 	"github.com/provasign/mason/internal/agent"
@@ -171,9 +172,16 @@ func run(args []string) int {
 	if strings.HasPrefix(model, "ollama:") || !strings.Contains(model, ":") {
 		ctxChars = 48_000 // local num_ctx is 16k tokens
 	}
+	factory := func(spec string) (provider.Provider, error) {
+		return provider.NewProvider(spec, func(vendor string) (string, error) {
+			return creds.Get(vendor, interactive)
+		})
+	}
+	colorOut := term.IsTerminal(int(os.Stdout.Fd()))
 	sess := agent.New(p, k.Invoke, agent.Options{
 		Root: root, MaxTurns: maxTurns, Permit: permit,
 		ProjectNotes: projectNotes(root), CtxChars: ctxChars,
+		Stream: true, Color: colorOut, NewProvider: factory,
 	})
 	sessFile := sessionPath(root)
 	if cont {
@@ -186,13 +194,12 @@ func run(args []string) int {
 	}
 
 	if task != "" {
-		reply, err := sess.Ask(task)
+		_, err := sess.Ask(task)
 		saveSession(sessFile, sess.History(), model)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "mason:", err)
 			return 1
 		}
-		fmt.Printf("\n%s\n", reply)
 		printCost(sess, model)
 		printSavings(k)
 		return 0
@@ -203,16 +210,36 @@ func run(args []string) int {
 		return 2
 	}
 
-	// REPL: one conversation, many tasks.
-	fmt.Println(`type a task, "/savings" for the token ledger, "/exit" to quit`)
-	reader := bufio.NewReader(os.Stdin)
+	// REPL: one conversation, many tasks. liner gives editing, history, and
+	// Ctrl+C-cancels-line without aborting the session.
+	fmt.Println(`type a task — /help for commands, /exit to quit`)
+	rl := liner.NewLiner()
+	rl.SetCtrlCAborts(true)
+	histPath := filepath.Join(filepath.Dir(sessionPath(root)), "..", "history")
+	if f, err := os.Open(histPath); err == nil {
+		_, _ = rl.ReadHistory(f)
+		f.Close()
+	}
+	saveHist := func() {
+		if f, err := os.Create(histPath); err == nil {
+			_, _ = rl.WriteHistory(f)
+			f.Close()
+		}
+		rl.Close()
+	}
+	defer saveHist()
 	for {
-		fmt.Print("\nmason> ")
-		line, err := reader.ReadString('\n')
+		line, err := rl.Prompt("\nmason> ")
+		if err == liner.ErrPromptAborted {
+			continue // Ctrl+C clears the line
+		}
 		if err != nil {
-			break
+			break // EOF / Ctrl+D
 		}
 		line = strings.TrimSpace(line)
+		if line != "" {
+			rl.AppendHistory(line)
+		}
 		switch {
 		case line == "":
 			continue
@@ -262,13 +289,11 @@ func run(args []string) int {
 			fmt.Println("unknown command — /help for the list")
 			continue
 		}
-		reply, err := sess.Ask(line)
+		_, err = sess.Ask(line)
 		saveSession(sessFile, sess.History(), model)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "mason:", err)
-			continue
 		}
-		fmt.Printf("\n%s\n", reply)
 	}
 	printCost(sess, model)
 	printSavings(k)

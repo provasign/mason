@@ -3,6 +3,7 @@ module github.com/provasign/mason
 go 1.26.3
 
 require (
+	github.com/peterh/liner v1.2.2
 	github.com/provasign/prism v0.23.0
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/term v0.45.0
@@ -14,6 +15,7 @@ require (
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/mattn/go-runewidth v0.0.3 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/provasign/astkit v0.4.20 // indirect
 	github.com/provasign/grove v0.19.1 // indirect

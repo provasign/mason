@@ -64,11 +64,20 @@ Works on an existing repo or an **empty directory** — "start a brand new Go
 project with a module, a package, and tests" scaffolds, builds, and tests a
 real project from nothing (verified E2E with a local model at $0).
 
-In the REPL: `/model <spec>` switches models mid-conversation, `/cost` shows
-session tokens and an estimated $ figure, `/savings` the graph-read ledger,
+Assistant text **streams** as it is generated (Ollama, Anthropic, OpenAI);
+the prompt has line editing and persistent history. In the REPL:
+`/model <spec>` switches models mid-conversation, `/cost` shows session
+tokens and an estimated $ figure, `/savings` the graph-read ledger,
 `/compact` summarizes old history (also automatic as context fills),
 `/clear`, `/help`, `/exit`. Sessions persist per repo; `--continue` resumes.
 `AGENTS.md` / `MASON.md` at the root are loaded as project instructions.
+
+**Subagents**: the model can delegate a self-contained subtask ("survey how
+X is structured", an isolated analysis) to a fresh agent with its own empty
+context and the same tools. Only the subagent's final summary returns —
+its intermediate reads never consume the parent's context. One level deep,
+half the parent's turn budget, optional cheaper model
+(`model: ollama:qwen2.5-coder:14b`) for exploration.
 
 ### Which model tier do I need?
 
