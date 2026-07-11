@@ -114,6 +114,8 @@ type Session struct {
 	mutated        bool  // any mutating tool ran during the current Ask
 	usageIn        int   // session-total input tokens
 	usageOut       int   // session-total output tokens
+	usageCacheR    int   // session-total cache-read tokens
+	usageCacheW    int   // session-total cache-write tokens
 	st             style // terminal styling
 }
 
@@ -122,7 +124,17 @@ func New(p provider.Provider, invoke Invoker, opts Options) *Session {
 		opts.Out = os.Stdout
 	}
 	if opts.MaxTurns == 0 {
-		opts.MaxTurns = 30
+		// Local models are free — the cap is a runaway guard, not a cost
+		// control, so it is generous there. --max-turns 0 becomes unlimited
+		// via -1 from the CLI.
+		if strings.HasPrefix(p.Name(), "ollama:") {
+			opts.MaxTurns = 60
+		} else {
+			opts.MaxTurns = 30
+		}
+	}
+	if opts.MaxTurns < 0 {
+		opts.MaxTurns = 1 << 30 // effectively unlimited; Ctrl+C is the guard
 	}
 	if opts.CtxChars == 0 {
 		opts.CtxChars = 400_000
@@ -171,6 +183,9 @@ func (s *Session) SetProvider(p provider.Provider) { s.provider = p }
 
 // Usage returns session-total input/output tokens across all API calls.
 func (s *Session) Usage() (in, out int) { return s.usageIn, s.usageOut }
+
+// CacheUsage returns session-total cache-read/cache-write tokens.
+func (s *Session) CacheUsage() (read, write int) { return s.usageCacheR, s.usageCacheW }
 
 // History returns the conversation (system prompt included) for persistence.
 func (s *Session) History() []provider.Msg { return s.msgs }
@@ -371,6 +386,8 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 		if reply.Usage != nil {
 			s.usageIn += reply.Usage.In
 			s.usageOut += reply.Usage.Out
+			s.usageCacheR += reply.Usage.CacheRead
+			s.usageCacheW += reply.Usage.CacheWrite
 		}
 
 		if len(reply.Calls) == 0 {

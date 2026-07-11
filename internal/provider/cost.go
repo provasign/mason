@@ -25,14 +25,28 @@ var priceTable = []struct {
 // Local (ollama:) models are $0. Unknown paid models return 0 — callers
 // should present token counts alongside, which are always exact.
 func EstimateCost(spec string, in, out int) float64 {
+	return EstimateCostCached(spec, in, out, 0, 0)
+}
+
+// EstimateCostCached prices cache traffic: anthropic cache reads ~10% and
+// writes ~125% of input price; openai cached tokens ~50% (already included
+// in `in`, so the discount is subtracted).
+func EstimateCostCached(spec string, in, out, cacheRead, cacheWrite int) float64 {
 	if strings.HasPrefix(spec, "ollama:") || !strings.Contains(spec, ":") {
 		return 0
 	}
 	name := spec[strings.Index(spec, ":")+1:]
 	for _, p := range priceTable {
-		if strings.Contains(name, p.match) {
-			return (float64(in)*p.in + float64(out)*p.out) / 1e6
+		if !strings.Contains(name, p.match) {
+			continue
 		}
+		base := float64(in)*p.in + float64(out)*p.out
+		if strings.HasPrefix(spec, "claude:") || strings.HasPrefix(spec, "anthropic:") {
+			base += float64(cacheRead)*p.in*0.1 + float64(cacheWrite)*p.in*1.25
+		} else {
+			base -= float64(cacheRead) * p.in * 0.5
+		}
+		return base / 1e6
 	}
 	return 0
 }

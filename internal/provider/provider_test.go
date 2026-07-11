@@ -90,3 +90,62 @@ func TestEstimateCost(t *testing.T) {
 		t.Fatal("4o-mini output price wrong")
 	}
 }
+
+// The exact serialization from the user's screenshot must parse.
+func TestParseQwenXMLCalls(t *testing.T) {
+	tools := []ToolDef{{Name: "search_symbols"}, {Name: "read_file"}}
+	content := "To determine which file handles sonar data, I'll search.\n\n<function=search_symbols> <parameter=query> sonar   </tool_call>"
+	calls := parseContentToolCalls(content, tools)
+	if len(calls) != 1 || calls[0].Name != "search_symbols" || calls[0].Args["query"] != "sonar" {
+		t.Fatalf("qwen xml not parsed: %+v", calls)
+	}
+	// multiple params + proper close tags
+	c2 := "<function=read_file>\n<parameter=path>\nsrc/main.py\n</parameter>\n</function>"
+	calls = parseContentToolCalls(c2, tools)
+	if len(calls) != 1 || calls[0].Args["path"] != "src/main.py" {
+		t.Fatalf("multi-line qwen xml not parsed: %+v", calls)
+	}
+	// unknown tool name must not parse
+	if got := parseContentToolCalls("<function=rm_rf> <parameter=x> y", tools); len(got) != 0 {
+		t.Fatalf("unknown tool accepted: %+v", got)
+	}
+}
+
+// Anthropic requests must carry prompt-cache breakpoints on system, tools,
+// and the history tip.
+func TestAnthropicCacheControl(t *testing.T) {
+	p := &anthropicProvider{model: "m", key: "k"}
+	payload := p.payload([]Msg{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "hello"},
+	}, []ToolDef{{Name: "a"}, {Name: "b"}}, false)
+	sys := payload["system"].([]map[string]any)
+	if sys[0]["cache_control"] == nil {
+		t.Fatal("system block not cached")
+	}
+	tdefs := payload["tools"].([]map[string]any)
+	if tdefs[len(tdefs)-1]["cache_control"] == nil {
+		t.Fatal("tools not cached")
+	}
+	msgs := payload["messages"].([]map[string]any)
+	blocks := msgs[len(msgs)-1]["content"].([]map[string]any)
+	if blocks[len(blocks)-1]["cache_control"] == nil {
+		t.Fatal("history tip not cached")
+	}
+}
+
+func TestEstimateCostCached(t *testing.T) {
+	// haiku: $1 in / $5 out per 1M
+	base := EstimateCostCached("claude:claude-haiku-4-5", 1_000_000, 0, 0, 0)
+	if base != 1.0 {
+		t.Fatalf("base = %f", base)
+	}
+	cached := EstimateCostCached("claude:claude-haiku-4-5", 0, 0, 1_000_000, 0)
+	if cached != 0.1 {
+		t.Fatalf("cache read should be 10%%: %f", cached)
+	}
+	written := EstimateCostCached("claude:claude-haiku-4-5", 0, 0, 0, 1_000_000)
+	if written != 1.25 {
+		t.Fatalf("cache write should be 125%%: %f", written)
+	}
+}

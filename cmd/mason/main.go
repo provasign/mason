@@ -45,7 +45,7 @@ flags:
   --continue       resume the previous conversation for this directory
   --yes            skip permission prompts for bash/edit/write
   --no-tui         plain line-based REPL instead of the full-screen UI
-  --max-turns <n>  per-task turn budget (default 30)
+  --max-turns <n>  per-task turn budget (default: 60 local, 30 API; 0 = unlimited)
 
 REPL commands: /models  /model <spec>  /cost  /savings  /compact  /clear  /help  /exit
 
@@ -140,6 +140,9 @@ func run(args []string) int {
 		case "--max-turns":
 			if i+1 < len(args) {
 				fmt.Sscanf(args[i+1], "%d", &maxTurns)
+				if maxTurns == 0 {
+					maxTurns = -1 // 0 means unlimited
+				}
 				i++
 			}
 		default:
@@ -317,7 +320,8 @@ func run(args []string) int {
 			},
 			Usage: func() (int, int, float64) {
 				in, out := sess.Usage()
-				return in, out, provider.EstimateCost(model, in, out)
+				cr, cw := sess.CacheUsage()
+				return in, out, provider.EstimateCostCached(model, in, out, cr, cw)
 			},
 			Savings: func() string {
 				if k == nil {
@@ -575,7 +579,11 @@ func printCost(sess *agent.Session, model string) {
 	if in+out == 0 {
 		return
 	}
-	cost := provider.EstimateCost(model, in, out)
+	cr, cw := sess.CacheUsage()
+	cost := provider.EstimateCostCached(model, in, out, cr, cw)
+	if cr > 0 {
+		fmt.Fprintf(os.Stderr, "cache: %d tokens read from prompt cache, %d written\n", cr, cw)
+	}
 	if cost > 0 {
 		fmt.Fprintf(os.Stderr, "usage: %d in / %d out tokens ≈ $%.4f (list-price estimate)\n", in, out, cost)
 	} else {

@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -30,8 +31,10 @@ type Msg struct {
 
 // Usage is one API call's token accounting as the provider reported it.
 type Usage struct {
-	In  int // input/prompt tokens
-	Out int // output/completion tokens
+	In         int // input/prompt tokens (excl. cache reads/writes for anthropic)
+	Out        int // output/completion tokens
+	CacheRead  int // tokens served from the provider's prompt cache
+	CacheWrite int // tokens written to the cache this call (anthropic)
 }
 
 // ToolCall is a provider-neutral tool invocation.
@@ -243,7 +246,11 @@ func (p *ollamaProvider) payload(msgs []Msg, tools []ToolDef, forceTools bool) m
 	}
 	payload := map[string]any{
 		"model": p.model, "messages": messages, "tools": tdefs, "stream": false,
-		"options": map[string]any{"temperature": 0, "num_ctx": numCtx()},
+		// keep_alive holds the model in memory between REPL turns; the
+		// append-only history then hits Ollama's prefix KV cache instead of
+		// re-ingesting the whole conversation.
+		"keep_alive": "30m",
+		"options":    map[string]any{"temperature": 0, "num_ctx": numCtx()},
 	}
 	if forceTools {
 		payload["tool_choice"] = "required"
@@ -299,7 +306,8 @@ func (p *ollamaProvider) chatOnce(ctx context.Context, msgs []Msg, tools []ToolD
 }
 
 // parseContentToolCalls recovers every tool call serialized into content:
-// the whole content as one JSON object, or any number of fenced blocks.
+// the whole content as one JSON object, any number of fenced JSON blocks,
+// or Qwen's XML dialect (<function=name> <parameter=key> value …).
 func parseContentToolCalls(content string, tools []ToolDef) []ToolCall {
 	if c := parseContentToolCall(content, tools); c != nil {
 		return []ToolCall{*c}
@@ -314,6 +322,47 @@ func parseContentToolCalls(content string, tools []ToolDef) []ToolCall {
 			c.ID = fmt.Sprintf("call_content_%d", i)
 			out = append(out, *c)
 		}
+	}
+	if len(out) > 0 {
+		return out
+	}
+	return parseQwenXMLCalls(content, tools)
+}
+
+var (
+	qwenFuncRe  = regexp.MustCompile(`<function=([A-Za-z_][A-Za-z0-9_]*)>`)
+	qwenParamRe = regexp.MustCompile(`<parameter=([A-Za-z_][A-Za-z0-9_]*)>\s*([^<]*)`)
+)
+
+// parseQwenXMLCalls handles the Qwen3 chat-template dialect that some Ollama
+// builds emit as plain content:
+//
+//	<function=search_symbols> <parameter=query> sonar </tool_call>
+//
+// (delimiters vary: </function>, </tool_call>, or nothing). Only known tool
+// names are accepted.
+func parseQwenXMLCalls(content string, tools []ToolDef) []ToolCall {
+	known := map[string]bool{}
+	for _, t := range tools {
+		known[t.Name] = true
+	}
+	locs := qwenFuncRe.FindAllStringSubmatchIndex(content, -1)
+	var out []ToolCall
+	for i, loc := range locs {
+		name := content[loc[2]:loc[3]]
+		if !known[name] {
+			continue
+		}
+		end := len(content)
+		if i+1 < len(locs) {
+			end = locs[i+1][0]
+		}
+		body := content[loc[1]:end]
+		args := map[string]any{}
+		for _, pm := range qwenParamRe.FindAllStringSubmatch(body, -1) {
+			args[pm[1]] = strings.TrimSpace(pm[2])
+		}
+		out = append(out, ToolCall{ID: fmt.Sprintf("call_xml_%d", i), Name: name, Args: args})
 	}
 	return out
 }
@@ -406,8 +455,29 @@ func (p *anthropicProvider) payload(msgs []Msg, tools []ToolDef, forceTools bool
 			"name": t.Name, "description": t.Description, "input_schema": t.Parameters,
 		})
 	}
+	// Prompt caching: system + tools are stable across every turn, and the
+	// history is append-only, so a rolling breakpoint on the last message
+	// makes each request a cache hit on the whole previous request's prefix
+	// (cached reads bill at ~10%).
+	if len(tdefs) > 0 {
+		tdefs[len(tdefs)-1]["cache_control"] = map[string]any{"type": "ephemeral"}
+	}
+	systemBlocks := []map[string]any{{
+		"type": "text", "text": system,
+		"cache_control": map[string]any{"type": "ephemeral"},
+	}}
+	if n := len(messages); n > 0 {
+		if blocks, ok := messages[n-1]["content"].([]map[string]any); ok && len(blocks) > 0 {
+			blocks[len(blocks)-1]["cache_control"] = map[string]any{"type": "ephemeral"}
+		} else if txt, ok := messages[n-1]["content"].(string); ok {
+			messages[n-1]["content"] = []map[string]any{{
+				"type": "text", "text": txt,
+				"cache_control": map[string]any{"type": "ephemeral"},
+			}}
+		}
+	}
 	payload := map[string]any{
-		"model": p.model, "max_tokens": 8192, "system": system,
+		"model": p.model, "max_tokens": 8192, "system": systemBlocks,
 		"messages": messages, "tools": tdefs,
 	}
 	if forceTools {
@@ -436,15 +506,18 @@ func (p *anthropicProvider) chatOnce(ctx context.Context, msgs []Msg, tools []To
 			Input map[string]any `json:"input"`
 		} `json:"content"`
 		Usage struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return Msg{}, err
 	}
 	out := Msg{Role: "assistant",
-		Usage: &Usage{In: resp.Usage.InputTokens, Out: resp.Usage.OutputTokens}}
+		Usage: &Usage{In: resp.Usage.InputTokens, Out: resp.Usage.OutputTokens,
+			CacheRead: resp.Usage.CacheReadInputTokens, CacheWrite: resp.Usage.CacheCreationInputTokens}}
 	for _, b := range resp.Content {
 		switch b.Type {
 		case "text":
@@ -540,8 +613,11 @@ func (p *openaiProvider) chatOnce(ctx context.Context, msgs []Msg, tools []ToolD
 			} `json:"message"`
 		} `json:"choices"`
 		Usage struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
+			PromptTokens        int `json:"prompt_tokens"`
+			CompletionTokens    int `json:"completion_tokens"`
+			PromptTokensDetails struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
@@ -552,7 +628,8 @@ func (p *openaiProvider) chatOnce(ctx context.Context, msgs []Msg, tools []ToolD
 	}
 	m := resp.Choices[0].Message
 	out := Msg{Role: "assistant", Content: m.Content,
-		Usage: &Usage{In: resp.Usage.PromptTokens, Out: resp.Usage.CompletionTokens}}
+		Usage: &Usage{In: resp.Usage.PromptTokens, Out: resp.Usage.CompletionTokens,
+			CacheRead: resp.Usage.PromptTokensDetails.CachedTokens}}
 	for _, c := range m.ToolCalls {
 		args := map[string]any{}
 		_ = json.Unmarshal([]byte(c.Function.Arguments), &args)

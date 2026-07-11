@@ -105,7 +105,7 @@ func (p *ollamaProvider) chatStreamOnce(ctx context.Context, msgs []Msg, tools [
 	flushed := false
 	looksLikeCall := func(s string) bool {
 		t := strings.TrimSpace(s)
-		return t == "" || strings.HasPrefix(t, "{") || strings.HasPrefix(t, "`")
+		return t == "" || strings.HasPrefix(t, "{") || strings.HasPrefix(t, "`") || strings.HasPrefix(t, "<")
 	}
 	err := postStream(ctx, p.url+"/api/chat", nil, payload, func(line []byte) error {
 		if len(bytes.TrimSpace(line)) == 0 {
