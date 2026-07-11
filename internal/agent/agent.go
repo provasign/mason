@@ -323,12 +323,21 @@ func (s *Session) dispatch(call provider.ToolCall, tr *trail.Trail) (string, err
 		if !s.permit("apply rename plan to working tree") {
 			return "", fmt.Errorf("user denied apply")
 		}
-		if err := applyRenamePlan(s.out, s.root, s.lastRenamePlan, includeAmbiguous); err != nil {
+		applied, skipped, ambLeft, err := applyRenamePlan(s.out, s.root, s.lastRenamePlan, includeAmbiguous)
+		if err != nil {
 			return "", err
 		}
 		s.mutated = true
 		tr.Note("applied rename plan (ambiguous=%v)", includeAmbiguous)
-		return "rename plan applied; now verify with the project's build or tests", nil
+		// The model must know the FULL apply state — especially the ambiguous
+		// remainder. Without this it hand-fixes the leftover callers one by
+		// one (measured: a 30B burned its whole turn budget doing exactly
+		// that) instead of making the one call that heals them.
+		res := fmt.Sprintf("applied %d edit(s), %d skipped", applied, skipped)
+		if ambLeft > 0 {
+			res += fmt.Sprintf(". %d AMBIGUOUS caller edits were NOT applied — if the build fails on the renamed symbol, call apply_rename_plan again with includeAmbiguous=true (one call fixes all of them; already-applied lines are skipped automatically). Do NOT edit rename sites by hand", ambLeft)
+		}
+		return res + ". Now verify with the project's build or tests.", nil
 	}
 
 	if call.Name == "subagent" {

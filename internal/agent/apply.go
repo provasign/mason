@@ -13,7 +13,7 @@ import (
 // skipped, never overwritten). Ambiguous edits are included only when the
 // caller opted in — they may contain a same-named call on a different
 // receiver, so the verify command is the safety net.
-func applyRenamePlan(out io.Writer, root string, plan map[string]any, includeAmbiguous bool) error {
+func applyRenamePlan(out io.Writer, root string, plan map[string]any, includeAmbiguous bool) (applied, skipped, ambiguousLeft int, err error) {
 	edits := asSlice(plan["edits"])
 	if includeAmbiguous {
 		if amb := asSlice(plan["ambiguous"]); len(amb) > 0 {
@@ -21,9 +21,13 @@ func applyRenamePlan(out io.Writer, root string, plan map[string]any, includeAmb
 			edits = append(edits, amb...)
 		}
 	}
+	ambiguousLeft = 0
+	if !includeAmbiguous {
+		ambiguousLeft = len(asSlice(plan["ambiguous"]))
+	}
 	if len(edits) == 0 {
 		fmt.Fprintln(out, "\napply: no confirmed edits to apply")
-		return nil
+		return 0, 0, ambiguousLeft, nil
 	}
 	byFile := map[string][]map[string]any{}
 	for _, e := range edits {
@@ -34,15 +38,14 @@ func applyRenamePlan(out io.Writer, root string, plan map[string]any, includeAmb
 		fp, _ := em["filePath"].(string)
 		byFile[fp] = append(byFile[fp], em)
 	}
-	applied, skipped := 0, 0
 	for fp, es := range byFile {
 		path := fp
 		if root != "" && !filepath.IsAbs(fp) {
 			path = filepath.Join(root, fp)
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("apply: %s: %w", fp, err)
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return applied, skipped, ambiguousLeft, fmt.Errorf("apply: %s: %w", fp, rerr)
 		}
 		lines := strings.Split(string(data), "\n")
 		for _, em := range es {
@@ -62,14 +65,14 @@ func applyRenamePlan(out io.Writer, root string, plan map[string]any, includeAmb
 			lines[ln] = after
 			applied++
 		}
-		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
-			return fmt.Errorf("apply: %s: %w", fp, err)
+		if werr := os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0o644); werr != nil {
+			return applied, skipped, ambiguousLeft, fmt.Errorf("apply: %s: %w", fp, werr)
 		}
 	}
 	fmt.Fprintf(out, "\napply: %d edit(s) applied, %d skipped", applied, skipped)
-	if amb := asSlice(plan["ambiguous"]); len(amb) > 0 && !includeAmbiguous {
-		fmt.Fprintf(out, "; %d AMBIGUOUS edits NOT applied (say \"apply ambiguous too\" to include them with a verify)", len(amb))
+	if ambiguousLeft > 0 {
+		fmt.Fprintf(out, "; %d AMBIGUOUS edits NOT applied", ambiguousLeft)
 	}
 	fmt.Fprintln(out)
-	return nil
+	return applied, skipped, ambiguousLeft, nil
 }

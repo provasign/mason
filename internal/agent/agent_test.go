@@ -152,8 +152,12 @@ func TestApplyRenamePlan(t *testing.T) {
 				"before": "\treturn id", "after": "\treturn id // amb"},
 		},
 	}
-	if err := applyRenamePlan(io.Discard, dir, plan, false); err != nil {
+	_, _, ambLeft, err := applyRenamePlan(io.Discard, dir, plan, false)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if ambLeft != 1 {
+		t.Fatalf("ambiguousLeft = %d, want 1", ambLeft)
 	}
 	got, _ := os.ReadFile(path)
 	if !strings.Contains(string(got), "GetDataKeyById(id string)") {
@@ -165,7 +169,7 @@ func TestApplyRenamePlan(t *testing.T) {
 	if strings.Contains(string(got), "// amb") {
 		t.Fatal("ambiguous edit applied without opt-in")
 	}
-	if err := applyRenamePlan(io.Discard, dir, plan, true); err != nil {
+	if _, _, _, err := applyRenamePlan(io.Discard, dir, plan, true); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = os.ReadFile(path)
