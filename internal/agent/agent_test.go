@@ -757,3 +757,31 @@ func TestEngineChecks(t *testing.T) {
 		t.Fatalf("dead = %v (must include only changed-file symbols)", dead)
 	}
 }
+
+// Compact rendering collapses long groups to a head + "+N more"; verbose
+// (maxItems 0) shows everything.
+func TestCompactRender(t *testing.T) {
+	full := map[string]any{"callers": func() []any {
+		var out []any
+		for i := 0; i < 20; i++ {
+			out = append(out, map[string]any{"filePath": fmt.Sprintf("f%02d.go", i), "name": "caller"})
+		}
+		return out
+	}()}
+	var compact, verbose strings.Builder
+	call := provider.ToolCall{Name: "change_impact", Args: map[string]any{"symbol": "T.m"}}
+	render(&compact, call, full, style{}, 6)
+	render(&verbose, call, full, style{}, 0)
+	if !strings.Contains(compact.String(), "+14 more") {
+		t.Fatalf("compact render missing overflow hint:\n%s", compact.String())
+	}
+	if strings.Count(compact.String(), ".go  caller") != 6 {
+		t.Fatalf("compact render shows %d items, want 6", strings.Count(compact.String(), ".go  caller"))
+	}
+	if strings.Count(verbose.String(), ".go  caller") != 20 {
+		t.Fatal("verbose render must show all items")
+	}
+	if !strings.Contains(compact.String(), "callers (20):") {
+		t.Fatal("group count header must always show the TRUE total")
+	}
+}

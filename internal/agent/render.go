@@ -94,9 +94,12 @@ func compactMeta(op string, full map[string]any) string {
 	return string(b)
 }
 
-// render prints the full deterministic result to the user — the harness,
-// not the model, is the relay.
-func render(out io.Writer, call provider.ToolCall, full map[string]any, st style) {
+// render prints the deterministic result to the user — the harness, not
+// the model, is the relay. maxItems caps each group (0 = unlimited): in
+// the TUI the payload is a progress artifact more often than the
+// deliverable, so it collapses to a head + "+N more" by default
+// (/verbose shows everything).
+func render(out io.Writer, call provider.ToolCall, full map[string]any, st style, maxItems int) {
 	fmt.Fprintf(out, "\n── %s", call.Name)
 	if s, ok := call.Args["symbol"].(string); ok {
 		fmt.Fprintf(out, " %s", s)
@@ -138,13 +141,26 @@ func render(out io.Writer, call provider.ToolCall, full map[string]any, st style
 			lines = append(lines, "  "+site(it))
 		}
 		sort.Strings(lines)
-		for _, l := range lines {
+		shown := len(lines)
+		if maxItems > 0 && shown > maxItems {
+			shown = maxItems
+		}
+		for _, l := range lines[:shown] {
 			fmt.Fprintln(out, l)
+		}
+		if shown < len(lines) {
+			fmt.Fprintln(out, st.dim(fmt.Sprintf("  … +%d more (/verbose to show everything)", len(lines)-shown)))
 		}
 	}
 	if edits := asSlice(full["edits"]); len(edits) > 0 {
 		fmt.Fprintf(out, "edits (%d):\n", len(edits))
+		shownE := 0
 		for _, e := range edits {
+			if maxItems > 0 && shownE >= maxItems {
+				fmt.Fprintln(out, st.dim(fmt.Sprintf("  … +%d more edits (/verbose to show everything)", len(edits)-shownE)))
+				break
+			}
+			shownE++
 			em, _ := e.(map[string]any)
 			if em == nil {
 				continue

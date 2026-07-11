@@ -33,6 +33,7 @@ type Config struct {
 	Savings     func() string // one-line ledger summary, "" if none
 	Compact     func(ctx context.Context) (before, after int, err error)
 	SetRedact   func(on bool)
+	SetVerbose  func(on bool) // full tool renders vs compact head + "+N more"
 	Clear       func()
 	SaveSession func()
 }
@@ -200,9 +201,11 @@ func (m *uiModel) layout() {
 	m.vp.GotoBottom()
 }
 
-// Run starts the full-screen UI and blocks until exit.
+// Run starts the full-screen UI and blocks until exit. Mouse mode is on
+// for wheel scrolling (terminal text selection needs Shift+drag while a
+// mouse-enabled TUI runs — the standard trade-off).
 func (u *UI) Run(cfg Config) error {
-	p := tea.NewProgram(newModel(u, cfg), tea.WithAltScreen())
+	p := tea.NewProgram(newModel(u, cfg), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err
 }
@@ -319,6 +322,12 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case statusMsg:
 		m.activity = string(msg)
 		return m, m.listen()
+
+	case tea.MouseMsg:
+		// Wheel scrolls the transcript.
+		var cmd tea.Cmd
+		m.vp, cmd = m.vp.Update(msg)
+		return m, cmd
 
 	case permMsg:
 		mm := msg
@@ -466,10 +475,11 @@ commands:
   /savings       graph-read token ledger
   /compact       summarize old history
   /auto [off]    blanket-approve bash/edit/write (or 'a' at any prompt)
+  /verbose [off] full tool results (default: collapsed to a head + '+N more')
   /secrets [off] secret redaction (default on)
   /clear         drop the conversation
   /exit          quit (Ctrl+C when idle also quits)
-keys: ↑/↓ PgUp/PgDn scroll · Ctrl+C cancels a running task
+keys: mouse wheel or PgUp/PgDn scroll (Shift+drag to select text) · Ctrl+C cancels a running task
 `)
 		return m, nil
 	case "/cost":
@@ -495,6 +505,21 @@ keys: ↑/↓ PgUp/PgDn scroll · Ctrl+C cancels a running task
 		default:
 			m.autoApprove = true
 			m.append("auto-approve ON — bash/edit/write run without asking (this session; /auto off to revert)\n")
+		}
+		return m, nil
+	case "/verbose":
+		arg := ""
+		if len(fields) > 1 {
+			arg = fields[1]
+		}
+		if m.cfg.SetVerbose != nil {
+			if arg == "off" {
+				m.cfg.SetVerbose(false)
+				m.append("compact tool output — long result groups collapse to a head + '+N more'\n")
+			} else {
+				m.cfg.SetVerbose(true)
+				m.append("verbose tool output — full result groups will be shown\n")
+			}
 		}
 		return m, nil
 	case "/secrets":

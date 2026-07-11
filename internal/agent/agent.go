@@ -88,7 +88,11 @@ type Options struct {
 	FileSymbols  func(path string) []SymbolInfo // engine hook: indexed symbols of a repo-relative file
 	Status       func(activity string)          // live activity narration for the UI status bar
 	NoRedact     bool                           // disable secret redaction (default ON)
+	CompactRender int                           // cap items per rendered group (0 = show all)
 }
+
+// SetCompactRender adjusts the per-group render cap mid-session (/verbose).
+func (s *Session) SetCompactRender(maxItems int) { s.opts.CompactRender = maxItems }
 
 // SetRedact toggles secret redaction mid-session (the /secrets command).
 func (s *Session) SetRedact(on bool) { s.opts.NoRedact = !on }
@@ -551,7 +555,7 @@ func (s *Session) dispatch(ctx context.Context, call provider.ToolCall, tr *trai
 		if call.Name == "rename_plan" {
 			s.lastRenamePlan = full
 		}
-		render(s.out, call, full, s.st)
+		render(s.out, call, full, s.st, s.opts.CompactRender)
 		tr.Note("prism %s: %s", call.Name, meta)
 		return meta, nil
 	}

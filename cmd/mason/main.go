@@ -253,6 +253,7 @@ func run(args []string) int {
 	if ui != nil {
 		opts.Out = ui.Writer()
 		opts.Status = ui.Status
+		opts.CompactRender = 6 // TUI default: collapse long result groups
 		// In the TUI, complete replies render as markdown (glamour) — worth
 		// more than raw token streaming inside a viewport; the spinner and
 		// tool lines carry liveness. Line mode keeps true streaming.
@@ -337,6 +338,13 @@ func run(args []string) int {
 			Compact:     sess.Compact,
 			Clear:       sess.Clear,
 			SetRedact:   sess.SetRedact,
+			SetVerbose: func(on bool) {
+				if on {
+					sess.SetCompactRender(0)
+				} else {
+					sess.SetCompactRender(6)
+				}
+			},
 			SaveSession: func() { saveSession(sessFile, sess.History(), model) },
 		})
 		if err != nil {
