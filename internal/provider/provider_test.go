@@ -77,3 +77,19 @@ func TestParseContentToolCallsMultiple(t *testing.T) {
 		t.Fatal("args lost")
 	}
 }
+
+func TestEstimateCost(t *testing.T) {
+	if c := EstimateCost("ollama:qwen3-coder:30b", 1e6, 1e6); c != 0 {
+		t.Fatalf("local must be $0, got %f", c)
+	}
+	c := EstimateCost("claude:claude-haiku-4-5-20251001", 1_000_000, 1_000_000)
+	if c != 6.0 { // $1 in + $5 out
+		t.Fatalf("haiku cost = %f", c)
+	}
+	if EstimateCost("gemini:gemini-2.5-flash", 1e6, 0) != 0.30 {
+		t.Fatal("gemini flash input price wrong")
+	}
+	if EstimateCost("openai:gpt-4o-mini", 0, 1e6) != 0.60 {
+		t.Fatal("4o-mini output price wrong")
+	}
+}

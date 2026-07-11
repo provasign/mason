@@ -244,3 +244,56 @@ func TestHonestyGuardSkipsReadOnly(t *testing.T) {
 		t.Fatalf("read-only reply rejected: %q %v", reply, err)
 	}
 }
+
+// Compaction must shrink history, keep the system prompt, and never leave a
+// dangling tool-result at the head of the kept tail.
+func TestCompact(t *testing.T) {
+	fp := &fakeProvider{replies: []provider.Msg{
+		{Role: "assistant", Content: "SUMMARY OF EVERYTHING"},
+	}}
+	s := New(fp, nil, Options{Root: t.TempDir(), Out: io.Discard})
+	for i := 0; i < 6; i++ {
+		s.msgs = append(s.msgs,
+			provider.Msg{Role: "user", Content: strings.Repeat("x", 500)},
+			provider.Msg{Role: "assistant", Content: strings.Repeat("y", 500)})
+	}
+	s.msgs = append(s.msgs, provider.Msg{Role: "tool", CallID: "1", Name: "grep", Content: "zzz"})
+	before, after, err := s.Compact()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after >= before {
+		t.Fatalf("no shrink: %d -> %d", before, after)
+	}
+	if s.msgs[0].Role != "system" {
+		t.Fatal("system prompt lost")
+	}
+	if !strings.Contains(s.msgs[1].Content, "SUMMARY OF EVERYTHING") {
+		t.Fatal("summary missing")
+	}
+	for _, m := range s.msgs {
+		if m.Role == "tool" && s.msgs[1].Role == "tool" {
+			t.Fatal("dangling tool result at head of tail")
+		}
+	}
+}
+
+// SetHistory keeps the fresh system prompt and restores the rest.
+func TestSetHistory(t *testing.T) {
+	s := New(&fakeProvider{}, nil, Options{Root: t.TempDir(), Out: io.Discard,
+		ProjectNotes: "PROJECT RULES"})
+	if !strings.Contains(s.msgs[0].Content, "PROJECT RULES") {
+		t.Fatal("project notes not in system prompt")
+	}
+	s.SetHistory([]provider.Msg{
+		{Role: "system", Content: "OLD STALE PROMPT"},
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "hi"},
+	})
+	if strings.Contains(s.msgs[0].Content, "OLD STALE PROMPT") {
+		t.Fatal("stale system prompt restored")
+	}
+	if len(s.msgs) != 3 || s.msgs[1].Content != "hello" {
+		t.Fatalf("history restore wrong: %+v", s.msgs)
+	}
+}

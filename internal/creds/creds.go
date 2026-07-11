@@ -29,6 +29,7 @@ const service = "mason"
 var envVar = map[string]string{
 	"anthropic": "ANTHROPIC_API_KEY",
 	"openai":    "OPENAI_API_KEY",
+	"gemini":    "GEMINI_API_KEY",
 }
 
 // Has reports whether a credential is available for vendor without
@@ -81,7 +82,7 @@ func Delete(vendor string) error {
 // Used by `mason login <provider>`.
 func Login(vendor string) error {
 	if _, ok := envVar[vendor]; !ok {
-		return fmt.Errorf("unknown provider %q (anthropic | openai)", vendor)
+		return fmt.Errorf("unknown provider %q (anthropic | openai | gemini)", vendor)
 	}
 	key, err := readSecret(fmt.Sprintf("%s API key: ", vendor))
 	if err != nil {

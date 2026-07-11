@@ -56,10 +56,12 @@ var mutationIntent = regexp.MustCompile(`(?i)\b(add|create|fix|change|implement|
 
 // Options configures a Session.
 type Options struct {
-	Root        string
-	Out         io.Writer
-	MaxTurns    int          // per Ask; default 30
-	Permit      func(action string) bool // gate for bash/edit/write; nil = allow
+	Root         string
+	Out          io.Writer
+	MaxTurns     int                      // per Ask; default 30
+	Permit       func(action string) bool // gate for bash/edit/write; nil = allow
+	ProjectNotes string                   // AGENTS.md/MASON.md content appended to the system prompt
+	CtxChars     int                      // history size that triggers auto-compaction (chars); default 400k
 }
 
 // Session is one conversation against one repository.
@@ -73,6 +75,8 @@ type Session struct {
 
 	lastRenamePlan map[string]any
 	mutated        bool // any mutating tool ran during the current Ask
+	usageIn        int  // session-total input tokens
+	usageOut       int  // session-total output tokens
 }
 
 func New(p provider.Provider, invoke Invoker, opts Options) *Session {
@@ -82,14 +86,93 @@ func New(p provider.Provider, invoke Invoker, opts Options) *Session {
 	if opts.MaxTurns == 0 {
 		opts.MaxTurns = 30
 	}
+	if opts.CtxChars == 0 {
+		opts.CtxChars = 400_000
+	}
+	sys := systemPrompt
+	if opts.ProjectNotes != "" {
+		sys += "\n\nProject instructions (from the repository's AGENTS.md/MASON.md):\n" + opts.ProjectNotes
+	}
 	return &Session{
 		provider: p,
 		invoke:   invoke,
 		root:     opts.Root,
 		out:      opts.Out,
 		opts:     opts,
-		msgs:     []provider.Msg{{Role: "system", Content: systemPrompt}},
+		msgs:     []provider.Msg{{Role: "system", Content: sys}},
 	}
+}
+
+// SetProvider switches the model mid-session; the conversation carries over.
+func (s *Session) SetProvider(p provider.Provider) { s.provider = p }
+
+// Usage returns session-total input/output tokens across all API calls.
+func (s *Session) Usage() (in, out int) { return s.usageIn, s.usageOut }
+
+// History returns the conversation (system prompt included) for persistence.
+func (s *Session) History() []provider.Msg { return s.msgs }
+
+// SetHistory restores a persisted conversation. The current system prompt is
+// kept (it may have been improved since the session was saved).
+func (s *Session) SetHistory(msgs []provider.Msg) {
+	restored := []provider.Msg{s.msgs[0]}
+	for _, m := range msgs {
+		if m.Role != "system" {
+			restored = append(restored, m)
+		}
+	}
+	s.msgs = restored
+}
+
+// Clear drops the conversation, keeping only the system prompt.
+func (s *Session) Clear() { s.msgs = s.msgs[:1] }
+
+// historyChars is the compaction pressure metric (≈ tokens × 4).
+func (s *Session) historyChars() int {
+	n := 0
+	for _, m := range s.msgs {
+		n += len(m.Content)
+	}
+	return n
+}
+
+// Compact summarizes everything but the last few messages into one message,
+// preserving the system prompt. Returns the chars before/after.
+func (s *Session) Compact() (before, after int, err error) {
+	before = s.historyChars()
+	if len(s.msgs) < 6 {
+		return before, before, nil
+	}
+	keepTail := 3
+	head := s.msgs[1 : len(s.msgs)-keepTail]
+	var b strings.Builder
+	for _, m := range head {
+		fmt.Fprintf(&b, "[%s] %s\n", m.Role, truncate(m.Content, 2000))
+		for _, c := range m.Calls {
+			fmt.Fprintf(&b, "[%s called %s]\n", m.Role, c.Name)
+		}
+	}
+	reply, cerr := s.provider.Chat([]provider.Msg{
+		{Role: "system", Content: "You compact coding-session history. Output ONLY a dense summary: the task(s), decisions made, files read/changed, verification results, and open items. No preamble."},
+		{Role: "user", Content: b.String()},
+	}, nil, false)
+	if cerr != nil {
+		return before, before, cerr
+	}
+	if reply.Usage != nil {
+		s.usageIn += reply.Usage.In
+		s.usageOut += reply.Usage.Out
+	}
+	// A tool-result tail must not dangle without its assistant call turn:
+	// drop leading tool msgs from the kept tail.
+	tail := s.msgs[len(s.msgs)-keepTail:]
+	for len(tail) > 0 && tail[0].Role == "tool" {
+		tail = tail[1:]
+	}
+	compacted := []provider.Msg{s.msgs[0],
+		{Role: "user", Content: "Summary of the conversation so far (older turns compacted):\n" + reply.Content}}
+	s.msgs = append(compacted, tail...)
+	return before, s.historyChars(), nil
 }
 
 func (s *Session) permit(action string) bool {
@@ -113,6 +196,12 @@ func (s *Session) Ask(task string) (string, error) {
 	nudged := false
 	startFP := treeFingerprint(s.root)
 
+	if s.historyChars() > s.opts.CtxChars {
+		if before, after, err := s.Compact(); err == nil && after < before {
+			fmt.Fprintf(s.out, "  ⋯ auto-compacted history %d → %d chars\n", before, after)
+		}
+	}
+
 	for turn := 0; turn < s.opts.MaxTurns; turn++ {
 		// Invocation wall: a graph-shaped task's FIRST turn sees only the
 		// graph tools and must call one. After that the full set opens up.
@@ -125,6 +214,10 @@ func (s *Session) Ask(task string) (string, error) {
 		}
 		if err != nil {
 			return "", fmt.Errorf("%s: %w", s.provider.Name(), err)
+		}
+		if reply.Usage != nil {
+			s.usageIn += reply.Usage.In
+			s.usageOut += reply.Usage.Out
 		}
 
 		if len(reply.Calls) == 0 {

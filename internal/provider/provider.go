@@ -23,6 +23,13 @@ type Msg struct {
 	Calls   []ToolCall // tool calls the assistant issued (Role=="assistant")
 	CallID  string     // for Role=="tool": which call this result answers
 	Name    string     // for Role=="tool": the tool name
+	Usage   *Usage     // token usage of the API call that produced this reply
+}
+
+// Usage is one API call's token accounting as the provider reported it.
+type Usage struct {
+	In  int // input/prompt tokens
+	Out int // output/completion tokens
 }
 
 // ToolCall is a provider-neutral tool invocation.
@@ -91,6 +98,7 @@ func truncate(s string, n int) string {
 //	ollama:<model>     local Ollama (default http://localhost:11434)
 //	claude:<model>     Anthropic API (ANTHROPIC_API_KEY)
 //	openai:<model>     OpenAI API (OPENAI_API_KEY)
+//	gemini:<model>     Google Gemini API (GEMINI_API_KEY)
 //
 // A bare spec with no prefix is treated as an Ollama model name.
 // getKey resolves the API key for a vendor ("anthropic" | "openai"); it is
@@ -116,6 +124,12 @@ func NewProvider(spec string, getKey func(vendor string) (string, error)) (Provi
 			return nil, fmt.Errorf("openai:%s: %w", model, err)
 		}
 		return &openaiProvider{model: model, key: key}, nil
+	case "gemini", "google":
+		key, err := getKey("gemini")
+		if err != nil {
+			return nil, fmt.Errorf("gemini:%s: %w", model, err)
+		}
+		return &geminiProvider{model: model, key: key}, nil
 	default:
 		// "qwen3-coder:30b" — the whole spec is an Ollama model tag.
 		return &ollamaProvider{model: spec, url: envOr("OLLAMA_HOST_URL", "http://localhost:11434")}, nil
@@ -195,11 +209,14 @@ func (p *ollamaProvider) Chat(msgs []Msg, tools []ToolDef, forceTools bool) (Msg
 				} `json:"function"`
 			} `json:"tool_calls"`
 		} `json:"message"`
+		PromptEvalCount int `json:"prompt_eval_count"`
+		EvalCount       int `json:"eval_count"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return Msg{}, err
 	}
-	out := Msg{Role: "assistant", Content: resp.Message.Content}
+	out := Msg{Role: "assistant", Content: resp.Message.Content,
+		Usage: &Usage{In: resp.PromptEvalCount, Out: resp.EvalCount}}
 	for i, c := range resp.Message.ToolCalls {
 		args := map[string]any{}
 		_ = json.Unmarshal(c.Function.Arguments, &args)
@@ -341,11 +358,16 @@ func (p *anthropicProvider) Chat(msgs []Msg, tools []ToolDef, forceTools bool) (
 			Name  string         `json:"name"`
 			Input map[string]any `json:"input"`
 		} `json:"content"`
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return Msg{}, err
 	}
-	out := Msg{Role: "assistant"}
+	out := Msg{Role: "assistant",
+		Usage: &Usage{In: resp.Usage.InputTokens, Out: resp.Usage.OutputTokens}}
 	for _, b := range resp.Content {
 		switch b.Type {
 		case "text":
@@ -424,6 +446,10 @@ func (p *openaiProvider) Chat(msgs []Msg, tools []ToolDef, forceTools bool) (Msg
 				} `json:"tool_calls"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return Msg{}, err
@@ -432,7 +458,8 @@ func (p *openaiProvider) Chat(msgs []Msg, tools []ToolDef, forceTools bool) (Msg
 		return Msg{}, fmt.Errorf("openai: empty choices")
 	}
 	m := resp.Choices[0].Message
-	out := Msg{Role: "assistant", Content: m.Content}
+	out := Msg{Role: "assistant", Content: m.Content,
+		Usage: &Usage{In: resp.Usage.PromptTokens, Out: resp.Usage.CompletionTokens}}
 	for _, c := range m.ToolCalls {
 		args := map[string]any{}
 		_ = json.Unmarshal([]byte(c.Function.Arguments), &args)
@@ -472,9 +499,12 @@ func DetectDefaultModel(hasKey func(vendor string) bool) (string, error) {
 	if hasKey("openai") {
 		return "openai:gpt-4o-mini", nil
 	}
+	if hasKey("gemini") {
+		return "gemini:gemini-2.5-flash", nil
+	}
 	return "", fmt.Errorf("no model available: install a blessed Ollama model " +
-		"(qwen3-coder:30b or qwen2.5-coder:14b), run `mason login anthropic` / " +
-		"`mason login openai`, or pass --model explicitly")
+		"(qwen3-coder:30b or qwen2.5-coder:14b), run `mason login " +
+		"<anthropic|openai|gemini>`, or pass --model explicitly")
 }
 
 func postJSONGet(url string) ([]byte, error) {

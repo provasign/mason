@@ -5,6 +5,9 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha1"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,18 +27,25 @@ const usage = `mason — coding agent with the code graph baked in
 
 usage:
   mason [flags] ["task"]        one-shot task, or interactive REPL if omitted
-  mason login <anthropic|openai>   store an API key in the OS keychain
-  mason logout <anthropic|openai>  remove a stored API key
+  mason login <anthropic|openai|gemini>    store an API key in the OS keychain
+  mason logout <anthropic|openai|gemini>   remove a stored API key
   mason version
 
 flags:
-  --model <spec>   ollama:<tag> | claude:<model> | openai:<model>  (default: auto-detect)
+  --model <spec>   ollama:<tag> | claude:<m> | openai:<m> | gemini:<m>  (default: auto-detect)
   --dir <path>     project root (default: current directory)
+  --continue       resume the previous conversation for this directory
   --yes            skip permission prompts for bash/edit/write
   --max-turns <n>  per-task turn budget (default 30)
 
-credentials: env var (ANTHROPIC_API_KEY / OPENAI_API_KEY) > OS keychain >
-interactive prompt. Keys are never written to config files, sessions, or logs.`
+REPL commands: /model <spec>  /cost  /savings  /compact  /clear  /help  /exit
+
+Project instructions: AGENTS.md and MASON.md at the root are loaded into the
+system prompt automatically.
+
+credentials: env var (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY) >
+OS keychain > interactive prompt. Keys are never written to config files,
+sessions, or logs.`
 
 func main() {
 	os.Exit(run(os.Args[1:]))
@@ -77,6 +87,7 @@ func run(args []string) int {
 	dir := "."
 	model := ""
 	yes := false
+	cont := false
 	maxTurns := 0
 	var taskParts []string
 	for i := 0; i < len(args); i++ {
@@ -93,6 +104,8 @@ func run(args []string) int {
 			}
 		case "--yes", "-y":
 			yes = true
+		case "--continue", "-c":
+			cont = true
 		case "--max-turns":
 			if i+1 < len(args) {
 				fmt.Sscanf(args[i+1], "%d", &maxTurns)
@@ -154,17 +167,33 @@ func run(args []string) int {
 		return strings.HasPrefix(strings.ToLower(strings.TrimSpace(ans)), "y")
 	}
 
+	ctxChars := 400_000
+	if strings.HasPrefix(model, "ollama:") || !strings.Contains(model, ":") {
+		ctxChars = 48_000 // local num_ctx is 16k tokens
+	}
 	sess := agent.New(p, k.Invoke, agent.Options{
 		Root: root, MaxTurns: maxTurns, Permit: permit,
+		ProjectNotes: projectNotes(root), CtxChars: ctxChars,
 	})
+	sessFile := sessionPath(root)
+	if cont {
+		if msgs, m, err := loadSession(sessFile); err == nil {
+			sess.SetHistory(msgs)
+			fmt.Fprintf(os.Stderr, "resumed %d messages (last model %s)\n", len(msgs), m)
+		} else {
+			fmt.Fprintln(os.Stderr, "no previous session to continue")
+		}
+	}
 
 	if task != "" {
 		reply, err := sess.Ask(task)
+		saveSession(sessFile, sess.History(), model)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "mason:", err)
 			return 1
 		}
 		fmt.Printf("\n%s\n", reply)
+		printCost(sess, model)
 		printSavings(k)
 		return 0
 	}
@@ -188,21 +217,131 @@ func run(args []string) int {
 		case line == "":
 			continue
 		case line == "/exit" || line == "/quit":
+			printCost(sess, model)
 			printSavings(k)
 			return 0
+		case line == "/help":
+			fmt.Println(usage)
+			continue
 		case line == "/savings":
 			printSavings(k)
 			continue
+		case line == "/cost":
+			printCost(sess, model)
+			continue
+		case line == "/clear":
+			sess.Clear()
+			fmt.Println("conversation cleared")
+			continue
+		case line == "/compact":
+			before, after, err := sess.Compact()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "compact:", err)
+			} else {
+				fmt.Printf("compacted %d → %d chars\n", before, after)
+			}
+			continue
+		case strings.HasPrefix(line, "/model"):
+			spec := strings.TrimSpace(strings.TrimPrefix(line, "/model"))
+			if spec == "" {
+				fmt.Println("current model:", model)
+				continue
+			}
+			np, err := provider.NewProvider(spec, func(vendor string) (string, error) {
+				return creds.Get(vendor, interactive)
+			})
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "model:", err)
+				continue
+			}
+			sess.SetProvider(np)
+			model = spec
+			fmt.Println("switched to", np.Name())
+			continue
+		case strings.HasPrefix(line, "/"):
+			fmt.Println("unknown command — /help for the list")
+			continue
 		}
 		reply, err := sess.Ask(line)
+		saveSession(sessFile, sess.History(), model)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "mason:", err)
 			continue
 		}
 		fmt.Printf("\n%s\n", reply)
 	}
+	printCost(sess, model)
 	printSavings(k)
 	return 0
+}
+
+// projectNotes loads AGENTS.md / MASON.md from the root (capped) so repos
+// can carry instructions the same way they do for Claude Code / Codex.
+func projectNotes(root string) string {
+	var parts []string
+	for _, name := range []string{"AGENTS.md", "MASON.md"} {
+		b, err := os.ReadFile(filepath.Join(root, name))
+		if err != nil || len(strings.TrimSpace(string(b))) == 0 {
+			continue
+		}
+		txt := string(b)
+		if len(txt) > 16_000 {
+			txt = txt[:16_000] + "\n…(truncated)"
+		}
+		parts = append(parts, "## "+name+"\n"+txt)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// sessionPath is the per-root conversation store (no credentials ever).
+func sessionPath(root string) string {
+	sum := sha1.Sum([]byte(root))
+	base, err := os.UserCacheDir()
+	if err != nil || base == "" {
+		base = os.TempDir()
+	}
+	return filepath.Join(base, "mason", "sessions", hex.EncodeToString(sum[:])+".json")
+}
+
+type sessionFile struct {
+	Model    string         `json:"model"`
+	Messages []provider.Msg `json:"messages"`
+}
+
+func saveSession(path string, msgs []provider.Msg, model string) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	b, err := json.Marshal(sessionFile{Model: model, Messages: msgs})
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, b, 0o600)
+}
+
+func loadSession(path string) ([]provider.Msg, string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, "", err
+	}
+	var sf sessionFile
+	if err := json.Unmarshal(b, &sf); err != nil {
+		return nil, "", err
+	}
+	return sf.Messages, sf.Model, nil
+}
+
+func printCost(sess *agent.Session, model string) {
+	in, out := sess.Usage()
+	if in+out == 0 {
+		return
+	}
+	cost := provider.EstimateCost(model, in, out)
+	if cost > 0 {
+		fmt.Fprintf(os.Stderr, "usage: %d in / %d out tokens ≈ $%.4f (list-price estimate)\n", in, out, cost)
+	} else {
+		fmt.Fprintf(os.Stderr, "usage: %d in / %d out tokens ($0 local or unpriced model)\n", in, out)
+	}
 }
 
 func printSavings(k *kit.Kit) {

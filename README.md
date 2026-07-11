@@ -49,13 +49,26 @@ go install github.com/provasign/mason/cmd/mason@latest   # or grab a release bin
 ```
 mason                          # interactive REPL in the current repo
 mason "task…"                  # one-shot
+mason --continue "follow-up…"  # resume this repo's previous conversation
 mason --model ollama:qwen3-coder:30b "task…"
 mason --model claude:claude-haiku-4-5-20251001 "task…"
+mason --model gemini:gemini-2.5-flash "task…"
 mason --dir ~/src/project --yes "task…"   # --yes skips bash/edit prompts
 ```
 
 Model auto-detection prefers an installed blessed Ollama model
-(qwen3-coder:30b, qwen2.5-coder:14b), then Anthropic, then OpenAI.
+(qwen3-coder:30b, qwen2.5-coder:14b), then Anthropic, then OpenAI, then
+Gemini.
+
+Works on an existing repo or an **empty directory** — "start a brand new Go
+project with a module, a package, and tests" scaffolds, builds, and tests a
+real project from nothing (verified E2E with a local model at $0).
+
+In the REPL: `/model <spec>` switches models mid-conversation, `/cost` shows
+session tokens and an estimated $ figure, `/savings` the graph-read ledger,
+`/compact` summarizes old history (also automatic as context fills),
+`/clear`, `/help`, `/exit`. Sessions persist per repo; `--continue` resumes.
+`AGENTS.md` / `MASON.md` at the root are loaded as project instructions.
 
 ### Which model tier do I need?
 
