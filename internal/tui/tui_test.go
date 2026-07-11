@@ -241,3 +241,48 @@ func TestCtrlJNewline(t *testing.T) {
 		t.Fatal("ctrl+j must not submit")
 	}
 }
+
+// Activity narration: agent status updates land in the status line while
+// busy and clear when the task completes.
+func TestActivityNarration(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	u := New()
+	cfg := Config{ModelName: "m",
+		Ask: func(ctx context.Context, task string) (string, error) {
+			u.Status("running: go test ./...")
+			close(started)
+			<-release
+			return "ok", nil
+		},
+		Usage: func() (int, int, float64) { return 21948, 418, 0 }}
+	m := newModel(u, cfg)
+	mm0, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = mm0.(uiModel)
+	mm, _ := m.Update(key("do it"))
+	m = mm.(uiModel)
+	mm, _ = m.Update(key("enter"))
+	m = mm.(uiModel)
+	<-started
+	// drain the status event
+	ev := <-u.events
+	mm, _ = m.Update(ev)
+	m = mm.(uiModel)
+	line := m.statusLine()
+	if !strings.Contains(line, "running: go test") {
+		t.Fatalf("activity missing from status line: %q", line)
+	}
+	if !strings.Contains(line, "21.9k↑") || !strings.Contains(line, "418↓") {
+		t.Fatalf("compact token counts missing: %q", line)
+	}
+	close(release)
+	ev = <-u.events // doneMsg
+	mm, _ = m.Update(ev)
+	m = mm.(uiModel)
+	if m.activity != "" {
+		t.Fatal("activity not cleared on done")
+	}
+	if !strings.Contains(m.statusLine(), "idle") {
+		t.Fatalf("status not idle after done: %q", m.statusLine())
+	}
+}

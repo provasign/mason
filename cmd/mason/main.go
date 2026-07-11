@@ -249,6 +249,7 @@ func run(args []string) int {
 	}
 	if ui != nil {
 		opts.Out = ui.Writer()
+		opts.Status = ui.Status
 		// In the TUI, complete replies render as markdown (glamour) — worth
 		// more than raw token streaming inside a viewport; the spinner and
 		// tool lines carry liveness. Line mode keeps true streaming.

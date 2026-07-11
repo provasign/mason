@@ -86,6 +86,7 @@ type Options struct {
 	Depth        int                      // 0 = top-level; subagents run at 1 and cannot recurse
 	NewProvider  func(spec string) (provider.Provider, error) // for subagent model overrides
 	FileSymbols  func(path string) []SymbolInfo // engine hook: indexed symbols of a repo-relative file
+	Status       func(activity string)          // live activity narration for the UI status bar
 }
 
 // SymbolInfo is one indexed symbol, provider-neutral (mirrors kit.FileSymbol).
@@ -141,6 +142,7 @@ func New(p provider.Provider, invoke Invoker, opts Options) *Session {
 // supports it. Returns the reply and whether its text already reached the
 // screen (so callers don't print it twice).
 func (s *Session) chat(ctx context.Context, tools []provider.ToolDef, force bool) (provider.Msg, bool, error) {
+	s.setStatus("thinking…")
 	if s.opts.Stream {
 		if str, ok := s.provider.(provider.Streamer); ok {
 			shown := false
@@ -248,6 +250,13 @@ func (s *Session) interrupted() error {
 	return fmt.Errorf("interrupted")
 }
 
+// setStatus narrates the agent's current activity to the UI (nil-safe).
+func (s *Session) setStatus(format string, args ...any) {
+	if s.opts.Status != nil {
+		s.opts.Status(fmt.Sprintf(format, args...))
+	}
+}
+
 func (s *Session) permit(action string) bool {
 	if s.opts.Permit == nil {
 		return true
@@ -316,6 +325,7 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 	}
 
 	if s.historyChars() > s.opts.CtxChars {
+		s.setStatus("compacting history…")
 		fmt.Fprintf(s.out, "  ⋯ compacting history…\n")
 		if before, after, err := s.Compact(ctx); err == nil && after < before {
 			fmt.Fprintf(s.out, "  ⋯ auto-compacted history %d → %d chars\n", before, after)
@@ -389,6 +399,7 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 			// symbols (graph-verified coverage beats textual patterns).
 			if s.treeChanged(startFP) {
 				// Reindex first so the graph reflects what the task wrote.
+				s.setStatus("quality gate: checking what changed…")
 				if s.invoke != nil {
 					_, _ = s.invoke("prism_index", map[string]any{})
 				}
@@ -502,6 +513,7 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 // coding tools return content to the model.
 func (s *Session) dispatch(ctx context.Context, call provider.ToolCall, tr *trail.Trail) (string, error) {
 	if _, ok := graphOps[call.Name]; ok {
+		s.setStatus("graph: %s %s", call.Name, compactArgs(call.Args))
 		fmt.Fprintf(s.out, "  %s\n", s.st.cyan("◆ "+call.Name+" "+compactArgs(call.Args)))
 		meta, full, err := runGraphOp(call, s.invoke)
 		if err != nil {
@@ -516,6 +528,7 @@ func (s *Session) dispatch(ctx context.Context, call provider.ToolCall, tr *trai
 	}
 
 	if call.Name == "apply_rename_plan" {
+		s.setStatus("applying rename plan…")
 		if s.lastRenamePlan == nil {
 			return "", fmt.Errorf("no rename_plan has been produced yet")
 		}
@@ -578,6 +591,7 @@ func (s *Session) runSubagent(ctx context.Context, call provider.ToolCall, tr *t
 		}
 		p = np
 	}
+	s.setStatus("subagent: %s", truncate(task, 60))
 	fmt.Fprintf(s.out, "  %s\n", s.st.cyan("⑂ subagent: "+truncate(task, 100)))
 	sub := New(p, s.invoke, Options{
 		Root: s.root,

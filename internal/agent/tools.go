@@ -174,6 +174,7 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 	switch call.Name {
 	case "read_file":
 		path, _ := call.Args["path"].(string)
+		s.setStatus("reading %s", path)
 		if s.invoke == nil {
 			// Engine unavailable: plain read, still root-confined.
 			abs, err := s.inRoot(path)
@@ -197,6 +198,7 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 	case "grep":
 		pattern, _ := call.Args["pattern"].(string)
 		sub, _ := call.Args["path"].(string)
+		s.setStatus("searching for %s", truncate(pattern, 40))
 		target := s.root
 		if sub != "" {
 			t, err := s.inRoot(sub)
@@ -216,6 +218,7 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 	case "list_files":
 		sub, _ := call.Args["path"].(string)
 		filter, _ := call.Args["filter"].(string)
+		s.setStatus("listing files…")
 		target := s.root
 		if sub != "" {
 			t, err := s.inRoot(sub)
@@ -246,6 +249,7 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 
 	case "edit_file":
 		path, _ := call.Args["path"].(string)
+		s.setStatus("editing %s", path)
 		oldText, _ := call.Args["old_text"].(string)
 		newText, _ := call.Args["new_text"].(string)
 		if !s.permitDetail("edit "+path, diffSnippet(oldText, newText)) {
@@ -275,6 +279,7 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 
 	case "write_file":
 		path, _ := call.Args["path"].(string)
+		s.setStatus("writing %s", path)
 		content, _ := call.Args["content"].(string)
 		abs, aerr := s.inRoot(path)
 		if aerr != nil {
@@ -306,6 +311,7 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 		if !s.permit("run: " + command) {
 			return "", fmt.Errorf("user denied command")
 		}
+		s.setStatus("running: %s", truncate(command, 50))
 		fmt.Fprintf(s.out, "  $ %s\n", command)
 		// bash can mutate the tree (sed, git, generators) — count it, so the
 		// honesty guard never false-fires on legitimate shell-made changes.

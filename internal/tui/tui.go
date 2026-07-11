@@ -53,6 +53,15 @@ func (u *UI) Permit(action string) bool {
 	return u.PermitDetail(action, "")
 }
 
+// Status receives the agent's live activity narration (non-blocking: a
+// stale activity line is better than a blocked agent).
+func (u *UI) Status(activity string) {
+	select {
+	case u.events <- statusMsg(activity):
+	default:
+	}
+}
+
 // PermitDetail additionally shows WHAT the action will do (a diff, a
 // content preview) in the transcript before asking y/n.
 func (u *UI) PermitDetail(action, detail string) bool {
@@ -75,7 +84,8 @@ func (w *chanWriter) Write(b []byte) (int, error) {
 }
 
 type (
-	chunkMsg string
+	chunkMsg  string
+	statusMsg string
 	permMsg  struct {
 		action string
 		detail string
@@ -131,6 +141,8 @@ type uiModel struct {
 	model     string
 	inWidth   int       // textarea width, for wrap-aware height growth
 	lastCtrlC time.Time // double-press guard for quit-at-idle
+	activity  string    // what the agent is doing right now
+	taskStart time.Time // for the elapsed display
 	// /models pick lists: 1..len(pickInstalled) switch instantly,
 	// continuing numbers download via ExecProcess.
 	pickInstalled []string
@@ -211,6 +223,8 @@ func (m *uiModel) submit(task string) tea.Cmd {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	m.busy = true
+	m.activity = "starting…"
+	m.taskStart = time.Now()
 	events := m.ui.events
 	ask := m.cfg.Ask
 	go func() {
@@ -220,22 +234,38 @@ func (m *uiModel) submit(task string) tea.Cmd {
 	return m.sp.Tick
 }
 
+// kfmt renders a token count compactly (413 → 413, 21948 → 21.9k).
+func kfmt(n int) string {
+	if n < 1000 {
+		return fmt.Sprintf("%d", n)
+	}
+	return fmt.Sprintf("%.1fk", float64(n)/1000)
+}
+
 func (m *uiModel) statusLine() string {
 	in, out, cost := m.cfg.Usage()
 	state := "idle — enter a task"
 	if m.busy {
-		state = m.sp.View() + " working (Ctrl+C cancels the task)"
+		act := m.activity
+		if act == "" {
+			act = "working…"
+		}
+		state = fmt.Sprintf("%s %s · %ds", m.sp.View(), act, int(time.Since(m.taskStart).Seconds()))
 	}
 	usage := ""
 	if in+out > 0 {
-		usage = fmt.Sprintf(" · %d in/%d out", in, out)
+		usage = fmt.Sprintf(" · %s↑ %s↓", kfmt(in), kfmt(out))
 		if cost > 0 {
 			usage += fmt.Sprintf(" ≈ $%.4f", cost)
 		} else {
-			usage += " ($0 local)"
+			usage += " $0"
 		}
 	}
-	return statusStyle.Render(fmt.Sprintf(" %s%s · %s", state, usage, m.model))
+	hint := ""
+	if m.busy {
+		hint = "   (Ctrl+C cancels)"
+	}
+	return statusStyle.Render(fmt.Sprintf(" %s%s · %s%s", state, usage, m.model, hint))
 }
 
 func (m uiModel) View() string {
@@ -277,6 +307,10 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.append(string(msg))
 		return m, m.listen()
 
+	case statusMsg:
+		m.activity = string(msg)
+		return m, m.listen()
+
 	case permMsg:
 		mm := msg
 		m.perm = &mm
@@ -305,6 +339,7 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case doneMsg:
 		m.busy = false
 		m.cancel = nil
+		m.activity = ""
 		if msg.err != nil {
 			m.append("\n" + errStyle.Render("✗ "+msg.err.Error()) + "\n")
 		}
