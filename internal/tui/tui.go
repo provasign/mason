@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -122,6 +123,7 @@ type uiModel struct {
 	cancel context.CancelFunc
 	perm   *permMsg
 	model  string
+	lastCtrlC time.Time // double-press guard for quit-at-idle
 	// /models pick lists: 1..len(pickInstalled) switch instantly,
 	// continuing numbers download via ExecProcess.
 	pickInstalled []string
@@ -247,6 +249,8 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.model = spec
 		m.append("switched to " + spec + "\n")
 		return m, nil
+	// NOTE: pullDoneMsg arrives via ExecProcess (tea-internal), not the
+	// events channel, so it does not consume the listener.
 
 	case doneMsg:
 		m.busy = false
@@ -257,7 +261,9 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.cfg.SaveSession != nil {
 			m.cfg.SaveSession()
 		}
-		return m, nil
+		// Re-arm the event listener — without this the channel reader dies
+		// with the task and the NEXT task's output backs up unseen.
+		return m, m.listen()
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -287,6 +293,13 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.busy && m.cancel != nil {
 				m.cancel()
 				m.append("\n" + errStyle.Render("… cancelling task") + "\n")
+				return m, nil
+			}
+			// Idle: require a second press within 2s — a reflexive Ctrl+C
+			// must not eat the session.
+			if time.Since(m.lastCtrlC) > 2*time.Second {
+				m.lastCtrlC = time.Now()
+				m.append(statusStyle.Render("press Ctrl+C again to exit (or /exit)") + "\n")
 				return m, nil
 			}
 			if m.cfg.SaveSession != nil {

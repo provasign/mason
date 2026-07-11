@@ -150,3 +150,51 @@ func TestPermissionDetailPreview(t *testing.T) {
 		t.Fatal("n must deny")
 	}
 }
+
+// Ctrl+C while busy must cancel the running task (ctx fires), keep the
+// program alive, and return to idle when doneMsg lands.
+func TestCtrlCCancelsTask(t *testing.T) {
+	started := make(chan struct{})
+	m, u := newTestModel(Config{ModelName: "m",
+		Ask: func(ctx context.Context, task string) (string, error) {
+			close(started)
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+		Usage: func() (int, int, float64) { return 0, 0, 0 }})
+	mm, _ := m.Update(key("long task"))
+	m = mm.(uiModel)
+	mm, _ = m.Update(key("enter"))
+	m = mm.(uiModel)
+	<-started
+	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	m = mm.(uiModel)
+	select {
+	case ev := <-u.events:
+		mm, _ = m.Update(ev)
+		m = mm.(uiModel)
+	case <-time.After(3 * time.Second):
+		t.Fatal("cancel did not unblock the task")
+	}
+	if m.busy {
+		t.Fatal("busy must clear after cancelled task completes")
+	}
+}
+
+// A single idle Ctrl+C must warn, not quit; the second within the window quits.
+func TestIdleCtrlCNeedsDoublePress(t *testing.T) {
+	m, _ := newTestModel(Config{ModelName: "m",
+		Usage: func() (int, int, float64) { return 0, 0, 0 }})
+	mm, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	m = mm.(uiModel)
+	if cmd != nil {
+		t.Fatal("first idle Ctrl+C must not quit")
+	}
+	if !strings.Contains(m.buf.String(), "again to exit") {
+		t.Fatal("no double-press hint shown")
+	}
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("second Ctrl+C must quit")
+	}
+}

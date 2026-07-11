@@ -497,3 +497,33 @@ func TestWritePermissionDisclosesOverwrite(t *testing.T) {
 		t.Fatalf("new file not disclosed: %q", details[1])
 	}
 }
+
+// An interrupt mid-flight must close the turn with an ASSISTANT-role marker
+// so the following Ask does not produce consecutive user messages (which
+// the Anthropic API rejects).
+func TestInterruptKeepsRoleAlternation(t *testing.T) {
+	fp := &fakeProvider{replies: []provider.Msg{{Role: "assistant", Content: "later"}}}
+	s := New(fp, nil, Options{Root: t.TempDir(), Out: io.Discard})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := s.Ask(ctx, "explain"); err == nil {
+		t.Fatal("want interrupt error")
+	}
+	h := s.History()
+	last := h[len(h)-1]
+	if last.Role != "assistant" {
+		t.Fatalf("turn not closed with assistant marker: last role=%s", last.Role)
+	}
+	prevUser := 0
+	for i := 1; i < len(h); i++ {
+		if h[i].Role == "user" && h[i-1].Role == "user" {
+			prevUser++
+		}
+	}
+	if prevUser > 0 {
+		t.Fatal("consecutive user messages after interrupt")
+	}
+	if _, err := s.Ask(context.Background(), "explain"); err != nil {
+		t.Fatalf("session broken after interrupt: %v", err)
+	}
+}

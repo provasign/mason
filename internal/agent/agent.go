@@ -208,6 +208,19 @@ func (s *Session) Compact() (before, after int, err error) {
 	return before, s.historyChars(), nil
 }
 
+// interrupted closes the current turn coherently after a cancellation: the
+// marker is ASSISTANT-role so the next Ask's user message alternates —
+// consecutive user turns are rejected by the Anthropic API (local models
+// tolerate them, which is exactly how this class of bug hides).
+func (s *Session) interrupted() error {
+	if n := len(s.msgs); n > 0 && s.msgs[n-1].Role == "assistant" {
+		return fmt.Errorf("interrupted")
+	}
+	s.msgs = append(s.msgs, provider.Msg{Role: "assistant",
+		Content: "[task interrupted by the user before completion]"})
+	return fmt.Errorf("interrupted")
+}
+
 func (s *Session) permit(action string) bool {
 	if s.opts.Permit == nil {
 		return true
@@ -260,10 +273,7 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 
 	for turn := 0; turn < s.opts.MaxTurns; turn++ {
 		if ctx.Err() != nil {
-			// Interrupted: close the turn coherently so the session can go on.
-			s.msgs = append(s.msgs, provider.Msg{Role: "user",
-				Content: "[the user interrupted this task]"})
-			return "", fmt.Errorf("interrupted")
+			return "", s.interrupted()
 		}
 		// Invocation wall: a graph-shaped task's FIRST turn sees only the
 		// graph tools and must call one. After that the full set opens up.
@@ -276,6 +286,10 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 			reply, shown, err = s.chat(ctx, tools, false)
 		}
 		if err != nil {
+			if ctx.Err() != nil {
+				// Ctrl+C aborted the in-flight call — not a provider fault.
+				return "", s.interrupted()
+			}
 			return "", fmt.Errorf("%s: %w", s.provider.Name(), err)
 		}
 		if reply.Usage != nil {
