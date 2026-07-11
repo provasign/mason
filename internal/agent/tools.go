@@ -120,6 +120,22 @@ func bashTimeout() time.Duration {
 	return 5 * time.Minute
 }
 
+// colorDiff indents and colors -/+ lines for the transcript.
+func (s *Session) colorDiff(d string) string {
+	lines := strings.Split(d, "\n")
+	for i, l := range lines {
+		switch {
+		case strings.HasPrefix(l, "- "):
+			lines[i] = "    " + s.st.red(l)
+		case strings.HasPrefix(l, "+ "):
+			lines[i] = "    " + s.st.green(l)
+		default:
+			lines[i] = "    " + l
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // diffSnippet renders a -/+ preview of a text replacement, capped so huge
 // edits do not flood the permission prompt.
 func diffSnippet(oldText, newText string) string {
@@ -291,7 +307,7 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 			return "", err
 		}
 		s.mutated = true
-		fmt.Fprintf(s.out, "  ✎ %s\n", path)
+		fmt.Fprintf(s.out, "  ✎ %s\n%s\n", path, s.colorDiff(diffSnippet(oldText, newText)))
 		return "edit applied", nil
 
 	case "write_file":
@@ -320,7 +336,15 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 			return "", err
 		}
 		s.mutated = true
-		fmt.Fprintf(s.out, "  ✎ %s (%d bytes)\n", path, len(content))
+		head = content
+		if lines := strings.SplitN(head, "\n", 13); len(lines) > 12 {
+			head = strings.Join(lines[:12], "\n") + "\n  …"
+		}
+		var hb strings.Builder
+		for _, l := range strings.Split(head, "\n") {
+			hb.WriteString("+ " + l + "\n")
+		}
+		fmt.Fprintf(s.out, "  ✎ %s (%d bytes)\n%s", path, len(content), s.colorDiff(strings.TrimRight(hb.String(), "\n"))+"\n")
 		return "file written", nil
 
 	case "bash":

@@ -13,6 +13,7 @@ type style struct{ on bool }
 func (st style) dim(s string) string    { return st.wrap("\x1b[2m", s) }
 func (st style) cyan(s string) string   { return st.wrap("\x1b[36m", s) }
 func (st style) green(s string) string  { return st.wrap("\x1b[32m", s) }
+func (st style) red(s string) string    { return st.wrap("\x1b[31m", s) }
 func (st style) yellow(s string) string { return st.wrap("\x1b[33m", s) }
 func (st style) bold(s string) string   { return st.wrap("\x1b[1m", s) }
 

@@ -332,6 +332,7 @@ func run(args []string) int {
 			},
 			Compact:     sess.Compact,
 			Clear:       sess.Clear,
+			SetRedact:   sess.SetRedact,
 			SaveSession: func() { saveSession(sessFile, sess.History(), model) },
 		})
 		if err != nil {

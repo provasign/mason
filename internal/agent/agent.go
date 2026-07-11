@@ -87,7 +87,11 @@ type Options struct {
 	NewProvider  func(spec string) (provider.Provider, error) // for subagent model overrides
 	FileSymbols  func(path string) []SymbolInfo // engine hook: indexed symbols of a repo-relative file
 	Status       func(activity string)          // live activity narration for the UI status bar
+	NoRedact     bool                           // disable secret redaction (default ON)
 }
+
+// SetRedact toggles secret redaction mid-session (the /secrets command).
+func (s *Session) SetRedact(on bool) { s.opts.NoRedact = !on }
 
 // SymbolInfo is one indexed symbol, provider-neutral (mirrors kit.FileSymbol).
 type SymbolInfo struct {
@@ -267,6 +271,9 @@ func (s *Session) permit(action string) bool {
 // the diff for an edit, the content head for a write, the counts for a
 // rename apply. Falls back to the plain gate when no detail handler is set.
 func (s *Session) permitDetail(action, detail string) bool {
+	if !s.opts.NoRedact {
+		detail, _ = redactSecrets(detail)
+	}
 	if s.opts.PermitDetail != nil {
 		return s.opts.PermitDetail(action, detail)
 	}
@@ -318,7 +325,7 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 			if content := s.readForContext(rel); content != "" {
 				fmt.Fprintf(s.out, "  %s\n", s.st.dim("· attached "+rel))
 				s.msgs = append(s.msgs, provider.Msg{Role: "user",
-					Content: "[mason attached " + rel + ", which the task mentions]\n" + content})
+					Content: "[mason attached " + rel + ", which the task mentions]\n" + s.redact(content)})
 			}
 		}
 	}
@@ -481,7 +488,7 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 				}
 			}
 			result, isErr := s.dispatch(ctx, call, tr)
-			content := result
+			content := s.redact(result)
 			if isErr != nil {
 				content = "error: " + isErr.Error()
 			}
@@ -506,7 +513,8 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 			if !shown {
 				fmt.Fprintf(s.out, "\n%s\n", s.renderFinal(text))
 			}
-			fmt.Fprintf(s.out, "%s\n", s.st.yellow("⚠ turn limit reached — verify the summary against the working tree"))
+			fmt.Fprintf(s.out, "%s\n", s.st.yellow(fmt.Sprintf(
+				"⚠ hit the %d-turn budget — the work may be complete, but this summary is unverified; check the tree (raise with --max-turns)", s.opts.MaxTurns)))
 			return text, nil
 		}
 	}
@@ -526,7 +534,7 @@ func (s *Session) dispatch(ctx context.Context, call provider.ToolCall, tr *trai
 		if call.Name == "rename_plan" {
 			s.lastRenamePlan = full
 		}
-		render(s.out, call, full)
+		render(s.out, call, full, s.st)
 		tr.Note("prism %s: %s", call.Name, meta)
 		return meta, nil
 	}

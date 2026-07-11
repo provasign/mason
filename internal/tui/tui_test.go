@@ -286,3 +286,39 @@ func TestActivityNarration(t *testing.T) {
 		t.Fatalf("status not idle after done: %q", m.statusLine())
 	}
 }
+
+// 'a' at a prompt grants and switches to blanket approval; subsequent
+// permission requests auto-approve without a prompt.
+func TestAlwaysApprove(t *testing.T) {
+	m, u := newTestModel(Config{ModelName: "m",
+		Usage: func() (int, int, float64) { return 0, 0, 0 }})
+	got := make(chan bool, 1)
+	go func() { got <- u.Permit("run: make build") }()
+	ev := <-u.events
+	mm, _ := m.Update(ev)
+	m = mm.(uiModel)
+	mm, _ = m.Update(key("a"))
+	m = mm.(uiModel)
+	if ok := <-got; !ok {
+		t.Fatal("'a' must grant")
+	}
+	if !m.autoApprove {
+		t.Fatal("'a' must enable blanket approval")
+	}
+	// second request: no prompt, auto-granted
+	go func() { got <- u.Permit("run: make test") }()
+	ev = <-u.events
+	mm, _ = m.Update(ev)
+	m = mm.(uiModel)
+	select {
+	case ok := <-got:
+		if !ok {
+			t.Fatal("auto-approve must grant")
+		}
+	default:
+		t.Fatal("auto-approve did not answer immediately")
+	}
+	if m.perm != nil {
+		t.Fatal("no prompt should be shown under auto-approve")
+	}
+}

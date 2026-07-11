@@ -32,6 +32,7 @@ type Config struct {
 	Usage       func() (in, out int, costUSD float64)
 	Savings     func() string // one-line ledger summary, "" if none
 	Compact     func(ctx context.Context) (before, after int, err error)
+	SetRedact   func(on bool)
 	Clear       func()
 	SaveSession func()
 }
@@ -143,6 +144,8 @@ type uiModel struct {
 	lastCtrlC time.Time // double-press guard for quit-at-idle
 	activity  string    // what the agent is doing right now
 	taskStart time.Time // for the elapsed display
+	autoApprove bool    // blanket approval (/auto, or 'a' at a prompt)
+	redactOff   bool    // /secrets off
 	// /models pick lists: 1..len(pickInstalled) switch instantly,
 	// continuing numbers download via ExecProcess.
 	pickInstalled []string
@@ -268,6 +271,9 @@ func (m *uiModel) statusLine() string {
 	if m.busy {
 		hint = "   (Ctrl+C cancels)"
 	}
+	if m.autoApprove {
+		hint += "  [AUTO]"
+	}
 	return statusStyle.Render(fmt.Sprintf(" %s%s · %s%s", state, usage, m.model, hint))
 }
 
@@ -279,7 +285,7 @@ func (m uiModel) View() string {
 		statusStyle.Render("· "+m.cfg.Root)
 	prompt := m.in.View()
 	if m.perm != nil {
-		prompt = permStyle.Render(fmt.Sprintf(" allow? %s  [y/n]", m.perm.action))
+		prompt = permStyle.Render(fmt.Sprintf(" allow? %s  [y/n/a=always]", m.perm.action))
 	}
 	return header + "\n" + m.vp.View() + "\n" + prompt + "\n" + m.statusLine()
 }
@@ -316,10 +322,15 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case permMsg:
 		mm := msg
-		m.perm = &mm
 		if mm.detail != "" {
 			m.append("\n" + permStyle.Render("proposed: "+mm.action) + "\n" + colorDiff(mm.detail) + "\n")
 		}
+		if m.autoApprove {
+			mm.resp <- true
+			m.append(statusStyle.Render("auto-approved: "+mm.action) + "\n")
+			return m, m.listen()
+		}
+		m.perm = &mm
 		return m, m.listen()
 
 	case pullDoneMsg:
@@ -368,6 +379,11 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "y":
 				m.perm.resp <- true
 				m.append(permStyle.Render(" allow? "+m.perm.action+" — YES") + "\n")
+				m.perm = nil
+			case "a":
+				m.autoApprove = true
+				m.perm.resp <- true
+				m.append(permStyle.Render(" allow? "+m.perm.action+" — ALWAYS (this session; /auto off to re-enable prompts)") + "\n")
 				m.perm = nil
 			case "n", "esc", "ctrl+c":
 				m.perm.resp <- false
@@ -449,6 +465,8 @@ commands:
   /cost          session token usage and cost
   /savings       graph-read token ledger
   /compact       summarize old history
+  /auto [off]    blanket-approve bash/edit/write (or 'a' at any prompt)
+  /secrets [off] secret redaction (default on)
   /clear         drop the conversation
   /exit          quit (Ctrl+C when idle also quits)
 keys: ↑/↓ PgUp/PgDn scroll · Ctrl+C cancels a running task
@@ -463,6 +481,40 @@ keys: ↑/↓ PgUp/PgDn scroll · Ctrl+C cancels a running task
 			m.append(s + "\n")
 		} else {
 			m.append("no ledgered reads yet\n")
+		}
+		return m, nil
+	case "/auto":
+		arg := ""
+		if len(fields) > 1 {
+			arg = fields[1]
+		}
+		switch arg {
+		case "off":
+			m.autoApprove = false
+			m.append("auto-approve OFF — actions will ask y/n again\n")
+		default:
+			m.autoApprove = true
+			m.append("auto-approve ON — bash/edit/write run without asking (this session; /auto off to revert)\n")
+		}
+		return m, nil
+	case "/secrets":
+		arg := ""
+		if len(fields) > 1 {
+			arg = fields[1]
+		}
+		switch arg {
+		case "off":
+			m.redactOff = true
+			if m.cfg.SetRedact != nil {
+				m.cfg.SetRedact(false)
+			}
+			m.append(errStyle.Render("secret redaction OFF — credentials in files WILL reach the model") + "\n")
+		default:
+			m.redactOff = false
+			if m.cfg.SetRedact != nil {
+				m.cfg.SetRedact(true)
+			}
+			m.append("secret redaction ON — detected credentials are replaced with [REDACTED:kind] before reaching the model\n")
 		}
 		return m, nil
 	case "/clear":

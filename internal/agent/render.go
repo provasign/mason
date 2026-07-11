@@ -96,7 +96,7 @@ func compactMeta(op string, full map[string]any) string {
 
 // render prints the full deterministic result to the user — the harness,
 // not the model, is the relay.
-func render(out io.Writer, call provider.ToolCall, full map[string]any) {
+func render(out io.Writer, call provider.ToolCall, full map[string]any, st style) {
 	fmt.Fprintf(out, "\n── %s", call.Name)
 	if s, ok := call.Args["symbol"].(string); ok {
 		fmt.Fprintf(out, " %s", s)
@@ -149,10 +149,10 @@ func render(out io.Writer, call provider.ToolCall, full map[string]any) {
 			if em == nil {
 				continue
 			}
-			fmt.Fprintf(out, "  %s:%v\n    - %s\n    + %s\n",
+			fmt.Fprintf(out, "  %s:%v\n    %s\n    %s\n",
 				em["filePath"], em["line"],
-				strings.TrimSpace(fmt.Sprint(em["before"])),
-				strings.TrimSpace(fmt.Sprint(em["after"])))
+				st.red("- "+strings.TrimSpace(fmt.Sprint(em["before"]))),
+				st.green("+ "+strings.TrimSpace(fmt.Sprint(em["after"]))))
 		}
 	}
 	for _, k := range []string{"completeness", "warning", "note", "unresolvedNote", "ambiguousNote"} {
