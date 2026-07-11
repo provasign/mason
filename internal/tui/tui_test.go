@@ -282,7 +282,7 @@ func TestActivityNarration(t *testing.T) {
 	if m.activity != "" {
 		t.Fatal("activity not cleared on done")
 	}
-	if !strings.Contains(m.statusLine(), "idle") {
+	if !strings.Contains(m.statusLine(), "ready") {
 		t.Fatalf("status not idle after done: %q", m.statusLine())
 	}
 }

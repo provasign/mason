@@ -195,6 +195,23 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 		content, _ := m["content"].(string)
 		return truncate(content, maxToolOutput), nil
 
+	case "lookup":
+		name, _ := call.Args["name"].(string)
+		s.setStatus("looking up %s", name)
+		if s.invoke == nil {
+			return "", fmt.Errorf("code graph unavailable — use read_file")
+		}
+		res, err := s.invoke("prism_lookup", map[string]any{"name": name})
+		if err != nil {
+			return "", err
+		}
+		m, _ := res.(map[string]any)
+		content, _ := m["content"].(string)
+		if content == "" {
+			return "", fmt.Errorf("no symbol named %q in the graph — try search_symbols", name)
+		}
+		return truncate(content, maxToolOutput), nil
+
 	case "grep":
 		pattern, _ := call.Args["pattern"].(string)
 		sub, _ := call.Args["path"].(string)

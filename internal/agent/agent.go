@@ -142,7 +142,6 @@ func New(p provider.Provider, invoke Invoker, opts Options) *Session {
 // supports it. Returns the reply and whether its text already reached the
 // screen (so callers don't print it twice).
 func (s *Session) chat(ctx context.Context, tools []provider.ToolDef, force bool) (provider.Msg, bool, error) {
-	s.setStatus("thinking…")
 	if s.opts.Stream {
 		if str, ok := s.provider.(provider.Streamer); ok {
 			shown := false
@@ -340,6 +339,11 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 		}
 		// Invocation wall: a graph-shaped task's FIRST turn sees only the
 		// graph tools and must call one. After that the full set opens up.
+		if turn == 0 {
+			s.setStatus("waiting for %s…", s.provider.Name())
+		} else {
+			s.setStatus("waiting for %s… (turn %d)", s.provider.Name(), turn+1)
+		}
 		var reply provider.Msg
 		var shown bool
 		var err error

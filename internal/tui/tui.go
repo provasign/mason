@@ -244,8 +244,11 @@ func kfmt(n int) string {
 
 func (m *uiModel) statusLine() string {
 	in, out, cost := m.cfg.Usage()
-	state := "idle — enter a task"
-	if m.busy {
+	state := "ready — waiting for your input"
+	switch {
+	case m.perm != nil:
+		state = "waiting for your approval  [y/n]"
+	case m.busy:
 		act := m.activity
 		if act == "" {
 			act = "working…"

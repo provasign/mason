@@ -18,6 +18,8 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 
 	"github.com/zalando/go-keyring"
@@ -77,13 +79,44 @@ func Delete(vendor string) error {
 	return keyring.Delete(service, vendor)
 }
 
-// Login prompts for a key (echo off) and stores it in the OS keychain.
-// Used by `mason login <provider>`.
+// keyPage is where each vendor issues API keys.
+var keyPage = map[string]string{
+	"anthropic": "https://console.anthropic.com/settings/keys",
+	"openai":    "https://platform.openai.com/api-keys",
+}
+
+// openBrowser opens url in the default browser, best-effort.
+func openBrowser(url string) bool {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", url)
+	case "linux":
+		cmd = exec.Command("xdg-open", url)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		return false
+	}
+	return cmd.Start() == nil
+}
+
+// Login walks a non-technical user through getting and storing a key: the
+// vendor's key page opens in the browser, the pasted key is hidden, and the
+// OS keychain is the only place it is written.
 func Login(vendor string) error {
 	if _, ok := envVar[vendor]; !ok {
 		return fmt.Errorf("unknown provider %q (anthropic | openai)", vendor)
 	}
-	key, err := readSecret(fmt.Sprintf("%s API key: ", vendor))
+	page := keyPage[vendor]
+	fmt.Printf("Opening %s in your browser…\n", page)
+	fmt.Println("  1. Sign in (create an account if needed)")
+	fmt.Println("  2. Create an API key and copy it")
+	fmt.Println("  3. Paste it below — input is hidden and goes only to your OS keychain")
+	if !openBrowser(page) {
+		fmt.Println("(could not open a browser — visit the URL above manually)")
+	}
+	key, err := readSecret(fmt.Sprintf("\n%s API key: ", vendor))
 	if err != nil {
 		return err
 	}
@@ -93,7 +126,7 @@ func Login(vendor string) error {
 	if err := Store(vendor, key); err != nil {
 		return fmt.Errorf("keychain store failed: %w", err)
 	}
-	fmt.Printf("stored %s credential in the OS keychain (service %q)\n", vendor, service)
+	fmt.Printf("✓ stored in the OS keychain — mason will use it automatically (mason logout %s to remove)\n", vendor)
 	return nil
 }
 
