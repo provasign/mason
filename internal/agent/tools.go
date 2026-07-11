@@ -127,7 +127,10 @@ func (s *Session) inRoot(rel string) (string, error) {
 		return "", fmt.Errorf("empty path")
 	}
 	abs := rel
-	if !filepath.IsAbs(rel) {
+	// Rooted-but-driveless paths ("/etc/x") are not IsAbs on Windows yet are
+	// clearly absolute intent — never join them under root.
+	rooted := filepath.IsAbs(rel) || strings.HasPrefix(rel, "/") || strings.HasPrefix(rel, "\\")
+	if !rooted {
 		abs = filepath.Join(s.root, rel)
 	}
 	clean := filepath.Clean(abs)
