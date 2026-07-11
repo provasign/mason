@@ -282,8 +282,11 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 	nudged := false
 	refusalNudged := false
 	groundingNudged := false
+	qualityNudged := false
+	ranTests := false
 	toolsRan := 0
 	startFP := treeFingerprint(s.root)
+	startStatus := porcelainStatus(s.root)
 
 	// A task that names existing files gets their content ATTACHED by the
 	// harness before the first model turn: weak models refuse to call
@@ -370,6 +373,41 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 				}
 				fmt.Fprintf(s.out, "\n%s\n", s.st.yellow("⚠ mason: this answer used no tools — it may not reflect the actual repository"))
 			}
+			// Quality gate: the tree changed — scan what changed for
+			// placeholder tests and unimplemented stubs, and check that
+			// written tests were actually RUN. Deterministic detection,
+			// forced fix: the model does not declare victory over
+			// scaffolding.
+			if s.treeChanged(startFP) {
+				changed := changedFilesSince(s.root, startStatus)
+				findings := scanQuality(s.root, changed)
+				testsNotRun := touchedTests(changed) && !ranTests
+				if (len(findings) > 0 || testsNotRun) && !qualityNudged {
+					qualityNudged = true
+					var b strings.Builder
+					b.WriteString("Quality gate — this work is not done:\n")
+					for _, f := range findings {
+						b.WriteString("  - " + f.String() + "\n")
+					}
+					if testsNotRun {
+						b.WriteString("  - tests were written or changed but NEVER RUN\n")
+					}
+					b.WriteString("Fix each item now: replace placeholder tests with real assertions " +
+						"about actual behavior, implement or remove stubs, then RUN the test " +
+						"suite with bash and report the real results.")
+					s.msgs = append(s.msgs, reply, provider.Msg{Role: "user", Content: b.String()})
+					continue
+				}
+				if len(findings) > 0 || testsNotRun {
+					fmt.Fprintf(s.out, "\n%s\n", s.st.yellow("⚠ mason quality gate — remaining issues:"))
+					for _, f := range findings {
+						fmt.Fprintf(s.out, "%s\n", s.st.yellow("  · "+f.String()))
+					}
+					if testsNotRun {
+						fmt.Fprintf(s.out, "%s\n", s.st.yellow("  · tests were written but never run"))
+					}
+				}
+			}
 			// Honesty guard: a change was requested but the tree is untouched —
 			// the summary would be a fabrication. Reject once, demand the tool.
 			if mutationIntent.MatchString(task) && !s.treeChanged(startFP) {
@@ -398,6 +436,11 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 
 		for _, call := range reply.Calls {
 			toolsRan++
+			if call.Name == "bash" {
+				if cmdStr, _ := call.Args["command"].(string); testRunRe.MatchString(cmdStr) {
+					ranTests = true
+				}
+			}
 			result, isErr := s.dispatch(ctx, call, tr)
 			content := result
 			if isErr != nil {
