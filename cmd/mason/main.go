@@ -133,6 +133,12 @@ func run(args []string) int {
 		return 1
 	}
 	defer k.Close()
+	// Delta-index so the graph reflects the CURRENT tree — answers from a
+	// stale graph are wrong answers. Cheap when nothing changed.
+	if _, err := k.Invoke("prism_index", map[string]any{}); err != nil {
+		fmt.Fprintln(os.Stderr, "mason: index:", err)
+		return 1
+	}
 
 	permit := func(action string) bool {
 		if yes {

@@ -148,6 +148,11 @@ func (s *Session) Ask(task string) (string, error) {
 				fmt.Fprintf(s.out, "\n⚠ mason: this task asked for a change but no file was modified\n")
 			}
 			s.msgs = append(s.msgs, reply)
+			// The task mutated the tree: delta-index so the NEXT question is
+			// answered from the current graph, not a stale one.
+			if s.invoke != nil && s.treeChanged(startFP) {
+				_, _ = s.invoke("prism_index", map[string]any{})
+			}
 			return text, nil
 		}
 		s.msgs = append(s.msgs, reply)
