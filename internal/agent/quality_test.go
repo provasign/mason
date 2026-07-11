@@ -129,3 +129,38 @@ func TestQualityGatePassesRealWork(t *testing.T) {
 		t.Fatalf("unexpected extra turns (gate false-fired): %d", len(fp.turns))
 	}
 }
+
+// Edits inside UNTRACKED files must move the fingerprint and appear in the
+// changed set — git status collapses untracked dirs and git diff ignores
+// untracked content, which blinded the guards in fresh projects.
+func TestUntrackedEditVisibility(t *testing.T) {
+	dir := t.TempDir()
+	for _, args := range [][]string{{"init", "-q"}, {"commit", "-q", "--allow-empty", "-m", "x"}} {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if err := cmd.Run(); err != nil {
+			t.Skip("git unavailable")
+		}
+	}
+	os.MkdirAll(filepath.Join(dir, "src"), 0o755)
+	os.WriteFile(filepath.Join(dir, "src", "m.py"), []byte("v1\n"), 0o644)
+	fp0 := treeFingerprint(dir)
+	st0 := porcelainStatus(dir)
+	// edit the already-untracked file (different size so the sig must move
+	// even on filesystems with coarse mtimes)
+	os.WriteFile(filepath.Join(dir, "src", "m.py"), []byte("v2 changed\n"), 0o644)
+	if treeFingerprint(dir) == fp0 {
+		t.Fatal("fingerprint blind to untracked-file edit")
+	}
+	changed := changedFilesSince(dir, st0)
+	found := false
+	for _, f := range changed {
+		if f == "src/m.py" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("untracked edit missing from changed set: %v", changed)
+	}
+}

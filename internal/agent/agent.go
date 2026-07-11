@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/provasign/mason/internal/provider"
@@ -84,6 +85,15 @@ type Options struct {
 	PermitDetail func(action, detail string) bool // permission gate WITH a preview (diffs); falls back to Permit
 	Depth        int                      // 0 = top-level; subagents run at 1 and cannot recurse
 	NewProvider  func(spec string) (provider.Provider, error) // for subagent model overrides
+	FileSymbols  func(path string) []SymbolInfo // engine hook: indexed symbols of a repo-relative file
+}
+
+// SymbolInfo is one indexed symbol, provider-neutral (mirrors kit.FileSymbol).
+type SymbolInfo struct {
+	Name          string
+	QualifiedName string
+	Kind          string
+	Line          int
 }
 
 // Session is one conversation against one repository.
@@ -374,13 +384,23 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 				fmt.Fprintf(s.out, "\n%s\n", s.st.yellow("⚠ mason: this answer used no tools — it may not reflect the actual repository"))
 			}
 			// Quality gate: the tree changed — scan what changed for
-			// placeholder tests and unimplemented stubs, and check that
-			// written tests were actually RUN. Deterministic detection,
-			// forced fix: the model does not declare victory over
-			// scaffolding.
+			// placeholder tests and unimplemented stubs, check that written
+			// tests were actually RUN, and ask the ENGINE about the new
+			// symbols (graph-verified coverage beats textual patterns).
 			if s.treeChanged(startFP) {
+				// Reindex first so the graph reflects what the task wrote.
+				if s.invoke != nil {
+					_, _ = s.invoke("prism_index", map[string]any{})
+				}
 				changed := changedFilesSince(s.root, startStatus)
 				findings := scanQuality(s.root, changed)
+				untested, deadNew := s.engineChecks(changed)
+				testsInScope := touchedTests(changed) || strings.Contains(strings.ToLower(task), "test")
+				if testsInScope {
+					for _, u := range untested {
+						findings = append(findings, u)
+					}
+				}
 				testsNotRun := touchedTests(changed) && !ranTests
 				if (len(findings) > 0 || testsNotRun) && !qualityNudged {
 					qualityNudged = true
@@ -407,6 +427,15 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 						fmt.Fprintf(s.out, "%s\n", s.st.yellow("  · tests were written but never run"))
 					}
 				}
+				if !testsInScope && len(untested) > 0 {
+					fmt.Fprintf(s.out, "%s\n", s.st.yellow("◆ graph: new code without test coverage (engine-verified):"))
+					for _, u := range untested {
+						fmt.Fprintf(s.out, "%s\n", s.st.yellow("  · "+u.String()))
+					}
+				}
+				for _, d := range deadNew {
+					fmt.Fprintf(s.out, "%s\n", s.st.yellow("◆ graph: "+d.String()))
+				}
 			}
 			// Honesty guard: a change was requested but the tree is untouched —
 			// the summary would be a fabrication. Reject once, demand the tool.
@@ -424,11 +453,6 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 			s.msgs = append(s.msgs, reply)
 			if !shown {
 				fmt.Fprintf(s.out, "\n%s\n", s.renderFinal(text))
-			}
-			// The task mutated the tree: delta-index so the NEXT question is
-			// answered from the current graph, not a stale one.
-			if s.invoke != nil && s.treeChanged(startFP) {
-				_, _ = s.invoke("prism_index", map[string]any{})
 			}
 			return text, nil
 		}
@@ -589,6 +613,135 @@ func compactArgs(args map[string]any) string {
 	return strings.Join(parts, " ")
 }
 
+// engineChecks interrogates the code graph about a task's changed files:
+// which new functions have no test coverage (untested_surface, closed-set)
+// and which are unreachable from any entry point (dead_code). Bounded and
+// best-effort — engine hiccups must never block a task.
+func (s *Session) engineChecks(changed []string) (untested, deadNew []qualityFinding) {
+	if s.invoke == nil || s.opts.FileSymbols == nil || len(changed) == 0 || len(changed) > 10 {
+		return nil, nil
+	}
+	changedSet := map[string]bool{}
+	var prodFiles []string
+	for _, f := range changed {
+		changedSet[f] = true
+		if !testFileRe.MatchString(f) && isSourceFile(f) {
+			prodFiles = append(prodFiles, f)
+		}
+	}
+	if len(prodFiles) > 5 {
+		prodFiles = prodFiles[:5]
+	}
+	checked := 0
+	for _, f := range prodFiles {
+		for _, sym := range s.opts.FileSymbols(f) {
+			if checked >= 8 {
+				break
+			}
+			k := strings.ToLower(sym.Kind)
+			if k != "function" && k != "method" {
+				continue
+			}
+			q := sym.QualifiedName
+			if q == "" {
+				q = sym.Name
+			}
+			checked++
+			res, err := s.invoke("prism_untested_surface", map[string]any{"query": q})
+			if err == nil {
+				full, _ := res.(map[string]any)
+				if full != nil && len(asSlice(full["untested"])) > 0 && len(asSlice(full["covered"])) == 0 {
+					untested = append(untested, qualityFinding{file: f, line: sym.Line,
+						what: q + " has NO test coverage (engine-verified, closed set)"})
+				}
+				continue
+			}
+			// untested_surface is type/method-scoped and rejects FREE
+			// functions (most of a fresh Python/Go project; engine follow-up
+			// filed) — fall back to a deterministic scan: does ANY test file
+			// in the repo reference this name?
+			if s.noTestReferences(sym.Name) {
+				untested = append(untested, qualityFinding{file: f, line: sym.Line,
+					what: q + " is referenced by no test file"})
+			}
+		}
+	}
+	if res, err := s.invoke("prism_dead_code", map[string]any{}); err == nil {
+		if full, _ := res.(map[string]any); full != nil {
+			for _, d := range asSlice(full["dead"]) {
+				dm, _ := d.(map[string]any)
+				if dm == nil {
+					continue
+				}
+				fp, _ := dm["filePath"].(string)
+				if !changedSet[fp] {
+					continue
+				}
+				name, _ := dm["qualifiedName"].(string)
+				if name == "" {
+					name, _ = dm["name"].(string)
+				}
+				deadNew = append(deadNew, qualityFinding{file: fp,
+					what: name + " was written but is unreachable from any entry point — wire it in or remove it"})
+				if len(deadNew) >= 6 {
+					break
+				}
+			}
+		}
+	}
+	return untested, deadNew
+}
+
+// noTestReferences scans the repository's test files for a word-boundary
+// mention of name. Bounded; errs on the side of silence.
+func (s *Session) noTestReferences(name string) bool {
+	if len(name) < 3 { // too generic to judge
+		return false
+	}
+	re, err := regexp.Compile(`\b` + regexp.QuoteMeta(name) + `\b`)
+	if err != nil {
+		return false
+	}
+	referenced := false
+	seen := 0
+	_ = filepath.WalkDir(s.root, func(p string, d os.DirEntry, err error) error {
+		if err != nil || referenced {
+			return filepath.SkipAll
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", ".grove", "node_modules", "vendor":
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		seen++
+		if seen > 20000 {
+			return filepath.SkipAll
+		}
+		rel, _ := filepath.Rel(s.root, p)
+		if !testFileRe.MatchString(rel) {
+			return nil
+		}
+		b, err := os.ReadFile(p)
+		if err == nil && re.Match(b) {
+			referenced = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return !referenced
+}
+
+// isSourceFile filters the engine checks to code the graph indexes.
+func isSourceFile(f string) bool {
+	switch strings.ToLower(filepath.Ext(f)) {
+	case ".go", ".py", ".java", ".ts", ".tsx", ".js", ".jsx", ".rb", ".cs", ".cpp", ".c", ".rs", ".php":
+		return true
+	}
+	return false
+}
+
 // filesMentioned resolves file names the task refers to — exact paths
 // first, then basename search anywhere in the repo (bounded) so "what does
 // main.py do" finds src/main.py. Returns repo-relative paths, max 3.
@@ -669,18 +822,33 @@ func (s *Session) readForContext(rel string) string {
 	return truncate(string(b), maxToolOutput)
 }
 
-// treeFingerprint captures the working tree's change state (tracked mods +
-// untracked paths + diff content). Empty when git is unavailable — the
-// guard then falls back to the mutating-tool flag.
+// treeFingerprint captures the working tree's change state: tracked mods
+// via git diff, plus the per-file status map (which carries size+mtime for
+// untracked files — edits inside untracked files must move the
+// fingerprint). Empty when git is unavailable — the guard then falls back
+// to the mutating-tool flag.
 func treeFingerprint(root string) string {
-	status := exec.Command("git", "-C", root, "status", "--porcelain")
-	st, err1 := status.Output()
-	diff := exec.Command("git", "-C", root, "diff")
-	df, err2 := diff.Output()
-	if err1 != nil || err2 != nil {
+	stMap := porcelainStatus(root)
+	if len(stMap) == 0 {
+		// distinguish "clean repo" from "no git": probe git itself
+		if err := exec.Command("git", "-C", root, "rev-parse", "--git-dir").Run(); err != nil {
+			return ""
+		}
+	}
+	keys := make([]string, 0, len(stMap))
+	for k := range stMap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(k + "\x00" + stMap[k] + "\n")
+	}
+	df, err := exec.Command("git", "-C", root, "diff").Output()
+	if err != nil {
 		return ""
 	}
-	sum := sha1.Sum(append(st, df...))
+	sum := sha1.Sum(append([]byte(b.String()), df...))
 	return hex.EncodeToString(sum[:])
 }
 

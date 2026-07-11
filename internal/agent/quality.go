@@ -55,10 +55,14 @@ func changedFilesSince(root string, startStatus map[string]string) []string {
 	return out
 }
 
-// porcelainStatus maps repo-relative path → its full status line.
+// porcelainStatus maps repo-relative path → a state signature. -uall lists
+// untracked files INDIVIDUALLY, and untracked entries get a size+mtime
+// signature appended: git shows no content state for them, so an edit to an
+// already-untracked file would otherwise be invisible — which blinded the
+// honesty guard and the quality gate in fresh projects (measured).
 func porcelainStatus(root string) map[string]string {
 	out := map[string]string{}
-	b, err := exec.Command("git", "-C", root, "status", "--porcelain").Output()
+	b, err := exec.Command("git", "-C", root, "status", "--porcelain", "-uall").Output()
 	if err != nil {
 		return out
 	}
@@ -71,7 +75,14 @@ func porcelainStatus(root string) map[string]string {
 		if i := strings.Index(path, " -> "); i >= 0 {
 			path = path[i+4:]
 		}
-		out[strings.Trim(path, `"`)] = line
+		path = strings.Trim(path, `"`)
+		sig := line
+		if strings.HasPrefix(line, "??") || strings.HasPrefix(line, "A ") || strings.HasPrefix(line, "AM") {
+			if fi, err := os.Stat(filepath.Join(root, path)); err == nil {
+				sig += fmt.Sprintf("|%d|%d", fi.Size(), fi.ModTime().UnixNano())
+			}
+		}
+		out[path] = sig
 	}
 	return out
 }

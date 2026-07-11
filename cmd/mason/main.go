@@ -150,7 +150,7 @@ func run(args []string) int {
 	interactive := term.IsTerminal(int(os.Stdin.Fd()))
 
 	if model == "" {
-		model = detectModel(interactive)
+		model = detectModel(mustAbsDir(dir), interactive)
 		if model == "" {
 			fmt.Fprintln(os.Stderr, "mason: no model available — run `mason models` to set up a free local model, or `mason login anthropic` / `mason login openai`")
 			return 1
@@ -232,6 +232,20 @@ func run(args []string) int {
 		Root: root, MaxTurns: maxTurns, Permit: permit, PermitDetail: permitDetail,
 		ProjectNotes: projectNotes(root), CtxChars: ctxChars,
 		Stream: true, Color: colorOut, NewProvider: factory,
+	}
+	if k != nil {
+		opts.FileSymbols = func(path string) []agent.SymbolInfo {
+			syms, err := k.FileSymbols(context.Background(), path)
+			if err != nil {
+				return nil
+			}
+			out := make([]agent.SymbolInfo, 0, len(syms))
+			for _, s := range syms {
+				out = append(out, agent.SymbolInfo{Name: s.Name,
+					QualifiedName: s.QualifiedName, Kind: s.Kind, Line: s.Line})
+			}
+			return out
+		}
 	}
 	if ui != nil {
 		opts.Out = ui.Writer()
@@ -440,7 +454,22 @@ func run(args []string) int {
 // installed local model, then stored API credentials. When nothing exists
 // and the terminal is interactive, it walks the user through a free local
 // setup instead of failing.
-func detectModel(interactive bool) string {
+func detectModel(root string, interactive bool) string {
+	// Sticky per-repo default: reuse the model last used here, if it is
+	// still available.
+	if _, last, err := loadSession(sessionPath(root)); err == nil && last != "" {
+		if strings.HasPrefix(last, "ollama:") || !strings.Contains(last, ":") {
+			tag := strings.TrimPrefix(last, "ollama:")
+			for _, t := range localmodels.Detect().Installed {
+				if t == tag {
+					return last
+				}
+			}
+		} else if vendor, ok := map[string]string{"claude": "anthropic", "anthropic": "anthropic",
+			"openai": "openai", "gpt": "openai"}[strings.SplitN(last, ":", 2)[0]]; ok && creds.Has(vendor) {
+			return last
+		}
+	}
 	st := localmodels.Detect()
 	if st.ServerUp {
 		installed := st.InstalledSet()
@@ -466,6 +495,15 @@ func detectModel(interactive bool) string {
 		}
 	}
 	return ""
+}
+
+// mustAbsDir resolves dir without failing (detection is best-effort).
+func mustAbsDir(dir string) string {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return dir
+	}
+	return abs
 }
 
 // projectNotes loads AGENTS.md / MASON.md from the root (capped) so repos

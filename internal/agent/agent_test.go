@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -698,5 +699,61 @@ func TestGroundingGuardSkipsGeneralQuestions(t *testing.T) {
 	}
 	if len(fp.turns) != 1 {
 		t.Fatalf("expected exactly one turn, got %d", len(fp.turns))
+	}
+}
+
+// The engine-backed gate: untested new symbols surface as findings; dead
+// new symbols surface as info. Fake engine, no real grove needed.
+func TestEngineChecks(t *testing.T) {
+	invoke := func(tool string, args map[string]any) (any, error) {
+		switch tool {
+		case "prism_untested_surface":
+			q, _ := args["query"].(string)
+			if q == "collectors.collect_all" {
+				return map[string]any{
+					"untested": []any{map[string]any{"filePath": "collectors.py", "name": q}},
+					"covered":  []any{},
+				}, nil
+			}
+			if q == "freefn" {
+				return nil, fmt.Errorf("change-impact: query must be Type.method, got %q", q)
+			}
+			return map[string]any{
+				"untested": []any{},
+				"covered":  []any{map[string]any{"filePath": "collectors.py"}},
+			}, nil
+
+		case "prism_dead_code":
+			return map[string]any{"dead": []any{
+				map[string]any{"filePath": "collectors.py", "qualifiedName": "collectors.orphan"},
+				map[string]any{"filePath": "elsewhere.py", "qualifiedName": "not.in.this.task"},
+			}}, nil
+		}
+		return map[string]any{}, nil
+	}
+	dir := t.TempDir()
+	// a test file that references collect_all but NOT freefn — the free-fn
+	// fallback must flag only freefn
+	os.WriteFile(filepath.Join(dir, "test_collectors.py"),
+		[]byte("from collectors import collect_all\n\ndef test_collect_all():\n    assert collect_all() is not None\n"), 0o644)
+	s := New(&fakeProvider{}, invoke, Options{Root: dir, Out: io.Discard,
+		FileSymbols: func(path string) []SymbolInfo {
+			return []SymbolInfo{
+				{Name: "collect_all", QualifiedName: "collectors.collect_all", Kind: "function", Line: 10},
+				{Name: "helper", QualifiedName: "collectors.helper", Kind: "function", Line: 30},
+				{Name: "freefn", QualifiedName: "freefn", Kind: "function", Line: 50}, // free fn → fallback path
+				{Name: "Config", QualifiedName: "collectors.Config", Kind: "class", Line: 1}, // skipped: not a function
+			}
+		}})
+	untested, dead := s.engineChecks([]string{"collectors.py"})
+	if len(untested) != 2 {
+		t.Fatalf("untested = %v", untested)
+	}
+	joined := untested[0].String() + untested[1].String()
+	if !strings.Contains(joined, "collect_all") || !strings.Contains(joined, "freefn") {
+		t.Fatalf("untested findings wrong: %v", untested)
+	}
+	if len(dead) != 1 || !strings.Contains(dead[0].String(), "orphan") {
+		t.Fatalf("dead = %v (must include only changed-file symbols)", dead)
 	}
 }
