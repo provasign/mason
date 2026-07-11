@@ -76,8 +76,13 @@ Works on an existing repo or an **empty directory** — "start a brand new Go
 project with a module, a package, and tests" scaffolds, builds, and tests a
 real project from nothing (verified E2E with a local model at $0).
 
-Assistant text **streams** as it is generated (Ollama, Anthropic, OpenAI);
-the prompt has line editing and persistent history. In the REPL:
+Interactive sessions open a **full-screen TUI**: scrolling transcript,
+input box, spinner, and a live status bar (state · tokens · cost · model).
+Permission prompts render inline (y/n), Ctrl+C cancels the running task
+without killing the session, ↑/↓/PgUp/PgDn scroll history. `--no-tui`
+keeps the plain line-based REPL (also used automatically when stdout is
+not a terminal). Assistant text **streams** as it is generated (Ollama,
+Anthropic, OpenAI). In either mode:
 `/model <spec>` switches models mid-conversation, `/cost` shows session
 tokens and an estimated $ figure, `/savings` the graph-read ledger,
 `/compact` summarizes old history (also automatic as context fills),

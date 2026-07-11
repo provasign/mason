@@ -23,6 +23,7 @@ import (
 	"github.com/provasign/mason/internal/creds"
 	"github.com/provasign/mason/internal/localmodels"
 	"github.com/provasign/mason/internal/provider"
+	"github.com/provasign/mason/internal/tui"
 	"github.com/provasign/prism/pkg/kit"
 )
 
@@ -42,6 +43,7 @@ flags:
   --dir <path>     project root (default: current directory)
   --continue       resume the previous conversation for this directory
   --yes            skip permission prompts for bash/edit/write
+  --no-tui         plain line-based REPL instead of the full-screen UI
   --max-turns <n>  per-task turn budget (default 30)
 
 REPL commands: /models  /model <spec>  /cost  /savings  /compact  /clear  /help  /exit
@@ -113,6 +115,7 @@ func run(args []string) int {
 	model := ""
 	yes := false
 	cont := false
+	noTUI := false
 	maxTurns := 0
 	var taskParts []string
 	for i := 0; i < len(args); i++ {
@@ -131,6 +134,8 @@ func run(args []string) int {
 			yes = true
 		case "--continue", "-c":
 			cont = true
+		case "--no-tui":
+			noTUI = true
 		case "--max-turns":
 			if i+1 < len(args) {
 				fmt.Sscanf(args[i+1], "%d", &maxTurns)
@@ -182,9 +187,19 @@ func run(args []string) int {
 		}
 	}
 
+	// Full-screen TUI is the default for an interactive REPL session.
+	useTUI := interactive && task == "" && !noTUI && term.IsTerminal(int(os.Stdout.Fd()))
+	var ui *tui.UI
+	if useTUI {
+		ui = tui.New()
+	}
+
 	permit := func(action string) bool {
 		if yes {
 			return true
+		}
+		if ui != nil {
+			return ui.Permit(action)
 		}
 		if !interactive {
 			fmt.Fprintf(os.Stderr, "denied (non-interactive without --yes): %s\n", action)
@@ -206,11 +221,15 @@ func run(args []string) int {
 		})
 	}
 	colorOut := term.IsTerminal(int(os.Stdout.Fd()))
-	sess := agent.New(p, invoke, agent.Options{
+	opts := agent.Options{
 		Root: root, MaxTurns: maxTurns, Permit: permit,
 		ProjectNotes: projectNotes(root), CtxChars: ctxChars,
 		Stream: true, Color: colorOut, NewProvider: factory,
-	})
+	}
+	if ui != nil {
+		opts.Out = ui.Writer()
+	}
+	sess := agent.New(p, invoke, opts)
 	sessFile := sessionPath(root)
 	if cont {
 		if msgs, m, err := loadSession(sessFile); err == nil {
@@ -244,6 +263,49 @@ func run(args []string) int {
 	if !interactive {
 		fmt.Fprintln(os.Stderr, "mason: no task given and stdin is not a terminal")
 		return 2
+	}
+
+	if ui != nil {
+		err := ui.Run(tui.Config{
+			ModelName: model,
+			Root:      root,
+			Version:   version,
+			Ask:       sess.Ask,
+			SwitchModel: func(spec string) error {
+				np, err := factory(spec)
+				if err != nil {
+					return err
+				}
+				sess.SetProvider(np)
+				model = spec
+				return nil
+			},
+			Usage: func() (int, int, float64) {
+				in, out := sess.Usage()
+				return in, out, provider.EstimateCost(model, in, out)
+			},
+			Savings: func() string {
+				if k == nil {
+					return ""
+				}
+				s := k.Savings()
+				if s.OriginalTokens == 0 {
+					return ""
+				}
+				return fmt.Sprintf("ledger: %d tokens delivered where raw reads would have cost %d (%.1f%% saved)",
+					s.DeliveredTokens, s.OriginalTokens, s.SavedPercent)
+			},
+			Compact:     sess.Compact,
+			Clear:       sess.Clear,
+			SaveSession: func() { saveSession(sessFile, sess.History(), model) },
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "mason:", err)
+			return 1
+		}
+		printCost(sess, model)
+		printSavings(k)
+		return 0
 	}
 
 	// REPL: one conversation, many tasks. liner gives editing, history, and
