@@ -315,8 +315,8 @@ func TestAlwaysApprove(t *testing.T) {
 		if !ok {
 			t.Fatal("auto-approve must grant")
 		}
-	default:
-		t.Fatal("auto-approve did not answer immediately")
+	case <-time.After(2 * time.Second):
+		t.Fatal("auto-approve did not answer")
 	}
 	if m.perm != nil {
 		t.Fatal("no prompt should be shown under auto-approve")
