@@ -198,3 +198,46 @@ func TestIdleCtrlCNeedsDoublePress(t *testing.T) {
 		t.Fatal("second Ctrl+C must quit")
 	}
 }
+
+// Long input must wrap: the textarea grows (up to a cap) instead of
+// scrolling horizontally, and resets to one line after submit.
+func TestInputWrapsAndGrows(t *testing.T) {
+	m, _ := newTestModel(Config{ModelName: "m",
+		Ask:   func(ctx context.Context, task string) (string, error) { return "ok", nil },
+		Usage: func() (int, int, float64) { return 0, 0, 0 }})
+	long := strings.Repeat("refactor the data collection layer and add tests ", 8)
+	mm, _ := m.Update(key(long))
+	m = mm.(uiModel)
+	if m.in.Height() < 2 {
+		t.Fatalf("input did not grow for wrapped text: height=%d", m.in.Height())
+	}
+	if m.in.Height() > 6 {
+		t.Fatalf("input grew past cap: %d", m.in.Height())
+	}
+	mm, _ = m.Update(key("enter"))
+	m = mm.(uiModel)
+	if m.in.Height() != 1 {
+		t.Fatalf("input not reset after submit: height=%d", m.in.Height())
+	}
+	if m.in.Value() != "" {
+		t.Fatal("input not cleared after submit")
+	}
+}
+
+// Ctrl+J inserts a newline instead of submitting.
+func TestCtrlJNewline(t *testing.T) {
+	m, _ := newTestModel(Config{ModelName: "m",
+		Usage: func() (int, int, float64) { return 0, 0, 0 }})
+	mm, _ := m.Update(key("first"))
+	m = mm.(uiModel)
+	mm, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlJ})
+	m = mm.(uiModel)
+	mm, _ = m.Update(key("second"))
+	m = mm.(uiModel)
+	if !strings.Contains(m.in.Value(), "first\nsecond") {
+		t.Fatalf("ctrl+j did not insert newline: %q", m.in.Value())
+	}
+	if m.busy {
+		t.Fatal("ctrl+j must not submit")
+	}
+}

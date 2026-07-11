@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -119,7 +119,7 @@ type uiModel struct {
 	ui     *UI
 	cfg    Config
 	vp     viewport.Model
-	in     textinput.Model
+	in     textarea.Model
 	sp     spinner.Model
 	buf    *strings.Builder // pointer: uiModel is copied every Update, and a copied Builder panics
 	wide   int
@@ -128,7 +128,8 @@ type uiModel struct {
 	busy   bool
 	cancel context.CancelFunc
 	perm   *permMsg
-	model  string
+	model     string
+	inWidth   int       // textarea width, for wrap-aware height growth
 	lastCtrlC time.Time // double-press guard for quit-at-idle
 	// /models pick lists: 1..len(pickInstalled) switch instantly,
 	// continuing numbers download via ExecProcess.
@@ -137,11 +138,51 @@ type uiModel struct {
 }
 
 func newModel(u *UI, cfg Config) uiModel {
-	in := textinput.New()
-	in.Placeholder = "type a task — /help for commands"
+	in := textarea.New()
+	in.Placeholder = "type a task — Enter sends, Ctrl+J for a new line, /help for commands"
+	in.ShowLineNumbers = false
+	in.CharLimit = 0
+	in.SetHeight(1)
 	in.Focus()
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	return uiModel{ui: u, cfg: cfg, in: in, sp: sp, model: cfg.ModelName, buf: &strings.Builder{}}
+}
+
+// syncInputHeight grows the textarea with its content, counting soft-wrapped
+// rows (LineCount only counts logical lines), so long tasks stay fully
+// visible without horizontal scrolling.
+func (m *uiModel) syncInputHeight() {
+	w := m.inWidth
+	if w <= 0 {
+		w = 80
+	}
+	h := 0
+	for _, line := range strings.Split(m.in.Value(), "\n") {
+		h += 1 + len([]rune(line))/w
+	}
+	if h < 1 {
+		h = 1
+	}
+	if h > 6 {
+		h = 6
+	}
+	if h != m.in.Height() {
+		m.in.SetHeight(h)
+		m.layout()
+	}
+}
+
+// layout recomputes the viewport height from the current terminal size and
+// input height.
+func (m *uiModel) layout() {
+	vh := m.tall - 3 - m.in.Height() // header, status, prompt block
+	if vh < 3 {
+		vh = 3
+	}
+	m.vp.Height = vh
+	m.vp.Width = m.wide
+	m.vp.SetContent(m.buf.String())
+	m.vp.GotoBottom()
 }
 
 // Run starts the full-screen UI and blocks until exit.
@@ -156,7 +197,7 @@ func (m uiModel) listen() tea.Cmd {
 }
 
 func (m uiModel) Init() tea.Cmd {
-	return tea.Batch(m.listen(), textinput.Blink)
+	return tea.Batch(m.listen(), textarea.Blink)
 }
 
 func (m *uiModel) append(s string) {
@@ -213,20 +254,23 @@ func (m uiModel) View() string {
 func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.wide, m.tall = msg.Width, msg.Height
-		vh := msg.Height - 4 // header, input, status
-		if vh < 3 {
-			vh = 3
+		// Degenerate sizes (0x0 from an unconfigured pty) would collapse
+		// the layout to one-char rows — fall back to a sane default.
+		if msg.Width < 20 {
+			msg.Width = 80
 		}
+		if msg.Height < 6 {
+			msg.Height = 24
+		}
+		m.wide, m.tall = msg.Width, msg.Height
 		if !m.ready {
-			m.vp = viewport.New(msg.Width, vh)
+			m.vp = viewport.New(msg.Width, 3)
 			m.ready = true
 			m.append(fmt.Sprintf("welcome — model %s · /models to switch · /help for commands\n", m.model))
-		} else {
-			m.vp.Width, m.vp.Height = msg.Width, vh
 		}
-		m.in.Width = msg.Width - 4
-		m.vp.SetContent(m.buf.String())
+		m.inWidth = msg.Width - 6 // textarea chrome (prompt gutter) eats columns
+		m.in.SetWidth(msg.Width - 2)
+		m.layout()
 		return m, nil
 
 	case chunkMsg:
@@ -312,13 +356,21 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.cfg.SaveSession()
 			}
 			return m, tea.Quit
-		case "up", "down", "pgup", "pgdown":
+		case "pgup", "pgdown":
 			var cmd tea.Cmd
 			m.vp, cmd = m.vp.Update(msg)
 			return m, cmd
+		case "ctrl+j":
+			// Insert a literal newline into the input.
+			var cmd tea.Cmd
+			m.in, cmd = m.in.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			m.syncInputHeight()
+			return m, cmd
 		case "enter":
 			line := strings.TrimSpace(m.in.Value())
-			m.in.SetValue("")
+			m.in.Reset()
+			m.in.SetHeight(1)
+			m.layout()
 			if line == "" {
 				return m, nil
 			}
@@ -337,6 +389,7 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.in, cmd = m.in.Update(msg)
+	m.syncInputHeight()
 	return m, cmd
 }
 
