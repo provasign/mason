@@ -7,6 +7,7 @@
 package agent
 
 import (
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
@@ -112,11 +113,11 @@ func New(p provider.Provider, invoke Invoker, opts Options) *Session {
 // chat runs one model turn, streaming text to the terminal when the provider
 // supports it. Returns the reply and whether its text already reached the
 // screen (so callers don't print it twice).
-func (s *Session) chat(tools []provider.ToolDef, force bool) (provider.Msg, bool, error) {
+func (s *Session) chat(ctx context.Context, tools []provider.ToolDef, force bool) (provider.Msg, bool, error) {
 	if s.opts.Stream {
 		if str, ok := s.provider.(provider.Streamer); ok {
 			shown := false
-			reply, err := str.ChatStream(s.msgs, tools, force, func(delta string) {
+			reply, err := str.ChatStream(ctx, s.msgs, tools, force, func(delta string) {
 				if !shown {
 					fmt.Fprintln(s.out)
 					shown = true
@@ -129,7 +130,7 @@ func (s *Session) chat(tools []provider.ToolDef, force bool) (provider.Msg, bool
 			return reply, shown, err
 		}
 	}
-	reply, err := s.provider.Chat(s.msgs, tools, force)
+	reply, err := s.provider.Chat(ctx, s.msgs, tools, force)
 	return reply, false, err
 }
 
@@ -182,7 +183,7 @@ func (s *Session) Compact() (before, after int, err error) {
 			fmt.Fprintf(&b, "[%s called %s]\n", m.Role, c.Name)
 		}
 	}
-	reply, cerr := s.provider.Chat([]provider.Msg{
+	reply, cerr := s.provider.Chat(context.Background(), []provider.Msg{
 		{Role: "system", Content: "You compact coding-session history. Output ONLY a dense summary: the task(s), decisions made, files read/changed, verification results, and open items. No preamble."},
 		{Role: "user", Content: b.String()},
 	}, nil, false)
@@ -213,15 +214,19 @@ func (s *Session) permit(action string) bool {
 }
 
 // Ask runs one user task to completion within the ongoing conversation and
-// returns the model's final text reply.
-func (s *Session) Ask(task string) (string, error) {
+// returns the model's final text reply. Cancelling ctx stops cleanly after
+// the in-flight step: the conversation stays consistent for the next Ask.
+func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 	s.msgs = append(s.msgs, provider.Msg{Role: "user", Content: task})
 	tr := trail.New(s.root, task)
 	defer tr.Done()
 
 	tools := toolDefs()
+	if s.invoke == nil {
+		tools = codingToolsOnly(tools) // engine unavailable — degrade gracefully
+	}
 	graphOnly := graphToolsOnly(tools)
-	wall := graphIntent.MatchString(task)
+	wall := s.invoke != nil && graphIntent.MatchString(task)
 	s.mutated = false
 	nudged := false
 	startFP := treeFingerprint(s.root)
@@ -233,15 +238,21 @@ func (s *Session) Ask(task string) (string, error) {
 	}
 
 	for turn := 0; turn < s.opts.MaxTurns; turn++ {
+		if ctx.Err() != nil {
+			// Interrupted: close the turn coherently so the session can go on.
+			s.msgs = append(s.msgs, provider.Msg{Role: "user",
+				Content: "[the user interrupted this task]"})
+			return "", fmt.Errorf("interrupted")
+		}
 		// Invocation wall: a graph-shaped task's FIRST turn sees only the
 		// graph tools and must call one. After that the full set opens up.
 		var reply provider.Msg
 		var shown bool
 		var err error
 		if wall && turn == 0 {
-			reply, shown, err = s.chat(graphOnly, true)
+			reply, shown, err = s.chat(ctx, graphOnly, true)
 		} else {
-			reply, shown, err = s.chat(tools, false)
+			reply, shown, err = s.chat(ctx, tools, false)
 		}
 		if err != nil {
 			return "", fmt.Errorf("%s: %w", s.provider.Name(), err)
@@ -285,7 +296,7 @@ func (s *Session) Ask(task string) (string, error) {
 		s.msgs = append(s.msgs, reply)
 
 		for _, call := range reply.Calls {
-			result, isErr := s.dispatch(call, tr)
+			result, isErr := s.dispatch(ctx, call, tr)
 			content := result
 			if isErr != nil {
 				content = "error: " + isErr.Error()
@@ -295,12 +306,32 @@ func (s *Session) Ask(task string) (string, error) {
 			})
 		}
 	}
+	// Out of turns. The work may well be complete (models overshoot
+	// investigating); force a tool-less wrap-up instead of reading turn
+	// exhaustion as failure — the tree state, not the turn count, is truth.
+	s.msgs = append(s.msgs, provider.Msg{Role: "user",
+		Content: "Turn limit reached. Stop working NOW. In plain text, summarize what was completed and what (if anything) remains."})
+	reply, shown, err := s.chat(ctx, nil, false)
+	if err == nil {
+		if reply.Usage != nil {
+			s.usageIn += reply.Usage.In
+			s.usageOut += reply.Usage.Out
+		}
+		if text := strings.TrimSpace(reply.Content); text != "" {
+			s.msgs = append(s.msgs, provider.Msg{Role: "assistant", Content: text})
+			if !shown {
+				fmt.Fprintf(s.out, "\n%s\n", text)
+			}
+			fmt.Fprintf(s.out, "%s\n", s.st.yellow("⚠ turn limit reached — verify the summary against the working tree"))
+			return text, nil
+		}
+	}
 	return "", fmt.Errorf("gave up after %d turns", s.opts.MaxTurns)
 }
 
 // dispatch routes one tool call. Graph ops go through payload isolation;
 // coding tools return content to the model.
-func (s *Session) dispatch(call provider.ToolCall, tr *trail.Trail) (string, error) {
+func (s *Session) dispatch(ctx context.Context, call provider.ToolCall, tr *trail.Trail) (string, error) {
 	if _, ok := graphOps[call.Name]; ok {
 		fmt.Fprintf(s.out, "  %s\n", s.st.cyan("◆ "+call.Name+" "+compactArgs(call.Args)))
 		meta, full, err := runGraphOp(call, s.invoke)
@@ -341,19 +372,19 @@ func (s *Session) dispatch(call provider.ToolCall, tr *trail.Trail) (string, err
 	}
 
 	if call.Name == "subagent" {
-		return s.runSubagent(call, tr)
+		return s.runSubagent(ctx, call, tr)
 	}
 
 	if call.Name != "bash" && call.Name != "edit_file" && call.Name != "write_file" {
 		fmt.Fprintf(s.out, "  %s\n", s.st.dim("· "+call.Name+" "+compactArgs(call.Args)))
 	}
-	return s.runCodingTool(call)
+	return s.runCodingTool(ctx, call)
 }
 
 // runSubagent delegates a subtask to a fresh Session with an EMPTY context:
 // its reads and tool traffic never enter the parent's context — only its
 // final summary returns. Depth-limited to one level.
-func (s *Session) runSubagent(call provider.ToolCall, tr *trail.Trail) (string, error) {
+func (s *Session) runSubagent(ctx context.Context, call provider.ToolCall, tr *trail.Trail) (string, error) {
 	if s.opts.Depth > 0 {
 		return "", fmt.Errorf("subagents cannot spawn subagents — do this work yourself")
 	}
@@ -380,7 +411,7 @@ func (s *Session) runSubagent(call provider.ToolCall, tr *trail.Trail) (string, 
 		Color:    s.opts.Color,
 		Depth:    s.opts.Depth + 1,
 	})
-	reply, err := sub.Ask(task)
+	reply, err := sub.Ask(ctx, task)
 	in, out := sub.Usage()
 	s.usageIn += in
 	s.usageOut += out
@@ -426,6 +457,19 @@ func (s *Session) treeChanged(startFP string) bool {
 		return s.mutated
 	}
 	return treeFingerprint(s.root) != startFP
+}
+
+// codingToolsOnly strips the graph ops (and read_file's engine dependency is
+// handled in the tool itself) when the engine could not be opened.
+func codingToolsOnly(all []provider.ToolDef) []provider.ToolDef {
+	var out []provider.ToolDef
+	for _, t := range all {
+		if _, ok := graphOps[t.Name]; ok || t.Name == "apply_rename_plan" {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 func graphToolsOnly(all []provider.ToolDef) []provider.ToolDef {

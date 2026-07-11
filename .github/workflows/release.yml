@@ -106,4 +106,6 @@ jobs:
         run: cd dist && sha256sum * | tee checksums.txt
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/checksums.txt
+          files: |
+            dist/checksums.txt
+            install.sh

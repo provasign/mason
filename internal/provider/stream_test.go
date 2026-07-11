@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -33,7 +34,7 @@ func TestAnthropicStream(t *testing.T) {
 	defer srv.Close()
 	p := &anthropicProvider{model: "m", key: "k", url: srv.URL}
 	var streamed strings.Builder
-	msg, err := p.ChatStream(nil, nil, false, func(s string) { streamed.WriteString(s) })
+	msg, err := p.ChatStream(context.Background(), nil, nil, false, func(s string) { streamed.WriteString(s) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +61,7 @@ func TestOpenAIStream(t *testing.T) {
 	defer srv.Close()
 	p := &openaiProvider{model: "m", key: "k", url: srv.URL}
 	var streamed strings.Builder
-	msg, err := p.ChatStream(nil, nil, false, func(s string) { streamed.WriteString(s) })
+	msg, err := p.ChatStream(context.Background(), nil, nil, false, func(s string) { streamed.WriteString(s) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +89,7 @@ func TestOllamaStreamHoldsBackToolCallJSON(t *testing.T) {
 	defer srv.Close()
 	p := &ollamaProvider{model: "m", url: srv.URL}
 	var streamed strings.Builder
-	msg, err := p.ChatStream(nil, []ToolDef{{Name: "dead_code"}}, false, func(s string) { streamed.WriteString(s) })
+	msg, err := p.ChatStream(context.Background(), nil, []ToolDef{{Name: "dead_code"}}, false, func(s string) { streamed.WriteString(s) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +114,7 @@ func TestOllamaStreamPlainText(t *testing.T) {
 	defer srv.Close()
 	p := &ollamaProvider{model: "m", url: srv.URL}
 	var streamed strings.Builder
-	msg, err := p.ChatStream(nil, nil, false, func(s string) { streamed.WriteString(s) })
+	msg, err := p.ChatStream(context.Background(), nil, nil, false, func(s string) { streamed.WriteString(s) })
 	if err != nil {
 		t.Fatal(err)
 	}

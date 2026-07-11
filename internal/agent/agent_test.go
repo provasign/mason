@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -22,7 +23,7 @@ type fakeProvider struct {
 }
 
 func (f *fakeProvider) Name() string { return "fake" }
-func (f *fakeProvider) Chat(msgs []provider.Msg, tools []provider.ToolDef, force bool) (provider.Msg, error) {
+func (f *fakeProvider) Chat(_ context.Context, msgs []provider.Msg, tools []provider.ToolDef, force bool) (provider.Msg, error) {
 	var names []string
 	for _, t := range tools {
 		names = append(names, t.Name)
@@ -65,7 +66,7 @@ func TestGraphPayloadIsolation(t *testing.T) {
 		}, nil
 	}
 	s := New(fp, invoke, Options{Root: t.TempDir(), Out: io.Discard})
-	reply, err := s.Ask("find every caller of DataKeyCache.GetById")
+	reply, err := s.Ask(context.Background(), "find every caller of DataKeyCache.GetById")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +94,7 @@ func TestInvocationWall(t *testing.T) {
 		return map[string]any{"dead": []any{}}, nil
 	}
 	s := New(fp, invoke, Options{Root: t.TempDir(), Out: io.Discard})
-	if _, err := s.Ask("clean up any dead code"); err != nil {
+	if _, err := s.Ask(context.Background(), "clean up any dead code"); err != nil {
 		t.Fatal(err)
 	}
 	if !fp.turns[0].forced {
@@ -122,7 +123,7 @@ func TestInvocationWall(t *testing.T) {
 func TestNoWallForPlainTasks(t *testing.T) {
 	fp := &fakeProvider{replies: []provider.Msg{{Role: "assistant", Content: "hi"}}}
 	s := New(fp, nil, Options{Root: t.TempDir(), Out: io.Discard})
-	if _, err := s.Ask("explain what this repository does"); err != nil {
+	if _, err := s.Ask(context.Background(), "explain what this repository does"); err != nil {
 		t.Fatal(err)
 	}
 	if fp.turns[0].forced {
@@ -184,15 +185,15 @@ func TestEditFileExactness(t *testing.T) {
 	path := filepath.Join(dir, "y.go")
 	os.WriteFile(path, []byte("a\nb\na\n"), 0o644)
 	s := New(&fakeProvider{}, nil, Options{Root: dir, Out: io.Discard})
-	if _, err := s.runCodingTool(provider.ToolCall{Name: "edit_file",
+	if _, err := s.runCodingTool(context.Background(), provider.ToolCall{Name: "edit_file",
 		Args: map[string]any{"path": "y.go", "old_text": "a\n", "new_text": "z\n"}}); err == nil {
 		t.Fatal("multi-match edit must fail")
 	}
-	if _, err := s.runCodingTool(provider.ToolCall{Name: "edit_file",
+	if _, err := s.runCodingTool(context.Background(), provider.ToolCall{Name: "edit_file",
 		Args: map[string]any{"path": "y.go", "old_text": "missing", "new_text": "z"}}); err == nil {
 		t.Fatal("no-match edit must fail")
 	}
-	if _, err := s.runCodingTool(provider.ToolCall{Name: "edit_file",
+	if _, err := s.runCodingTool(context.Background(), provider.ToolCall{Name: "edit_file",
 		Args: map[string]any{"path": "y.go", "old_text": "b\n", "new_text": "z\n"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +208,7 @@ func TestPermissionGate(t *testing.T) {
 	dir := t.TempDir()
 	s := New(&fakeProvider{}, nil, Options{Root: dir, Out: io.Discard,
 		Permit: func(string) bool { return false }})
-	if _, err := s.runCodingTool(provider.ToolCall{Name: "bash",
+	if _, err := s.runCodingTool(context.Background(), provider.ToolCall{Name: "bash",
 		Args: map[string]any{"command": "touch " + filepath.Join(dir, "no.txt")}}); err == nil {
 		t.Fatal("denied bash must error")
 	}
@@ -227,7 +228,7 @@ func TestHonestyGuard(t *testing.T) {
 	}}
 	dir := t.TempDir()
 	s := New(fp, nil, Options{Root: dir, Out: io.Discard})
-	reply, err := s.Ask("add a constant DemoMarker to version.go")
+	reply, err := s.Ask(context.Background(), "add a constant DemoMarker to version.go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +244,7 @@ func TestHonestyGuard(t *testing.T) {
 func TestHonestyGuardSkipsReadOnly(t *testing.T) {
 	fp := &fakeProvider{replies: []provider.Msg{{Role: "assistant", Content: "it does X"}}}
 	s := New(fp, nil, Options{Root: t.TempDir(), Out: io.Discard})
-	reply, err := s.Ask("explain what this repository does")
+	reply, err := s.Ask(context.Background(), "explain what this repository does")
 	if err != nil || reply != "it does X" {
 		t.Fatalf("read-only reply rejected: %q %v", reply, err)
 	}
@@ -323,7 +324,7 @@ func TestSubagent(t *testing.T) {
 		return map[string]any{}, nil
 	}
 	s := New(fp, invoke, Options{Root: t.TempDir(), Out: io.Discard, MaxTurns: 10})
-	reply, err := s.Ask("survey the repository configuration")
+	reply, err := s.Ask(context.Background(), "survey the repository configuration")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -350,9 +351,104 @@ func TestSubagent(t *testing.T) {
 
 func TestSubagentDepthGuard(t *testing.T) {
 	s := New(&fakeProvider{}, nil, Options{Root: t.TempDir(), Out: io.Discard, Depth: 1, MaxTurns: 10})
-	_, err := s.runSubagent(provider.ToolCall{Name: "subagent",
+	_, err := s.runSubagent(context.Background(), provider.ToolCall{Name: "subagent",
 		Args: map[string]any{"task": "recurse"}}, nil)
 	if err == nil || !strings.Contains(err.Error(), "cannot spawn") {
 		t.Fatalf("depth guard missing: %v", err)
+	}
+}
+
+// Model-supplied paths must never escape the project root.
+func TestPathJail(t *testing.T) {
+	dir := t.TempDir()
+	s := New(&fakeProvider{}, nil, Options{Root: dir, Out: io.Discard})
+	for _, tc := range []provider.ToolCall{
+		{Name: "edit_file", Args: map[string]any{"path": "../escape.go", "old_text": "a", "new_text": "b"}},
+		{Name: "write_file", Args: map[string]any{"path": "../../pwned.txt", "content": "x"}},
+		{Name: "write_file", Args: map[string]any{"path": "/etc/mason-pwned", "content": "x"}},
+		{Name: "grep", Args: map[string]any{"pattern": "x", "path": "../.."}},
+		{Name: "list_files", Args: map[string]any{"path": "../.."}},
+	} {
+		if _, err := s.runCodingTool(context.Background(), tc); err == nil || !strings.Contains(err.Error(), "escapes") {
+			t.Fatalf("%s with %v must be jailed, got err=%v", tc.Name, tc.Args["path"], err)
+		}
+	}
+	// In-root paths still work.
+	if _, err := s.runCodingTool(context.Background(), provider.ToolCall{Name: "write_file",
+		Args: map[string]any{"path": "sub/ok.txt", "content": "fine"}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A hung bash command must be cut off by the timeout, not hang the session.
+func TestBashTimeout(t *testing.T) {
+	t.Setenv("MASON_BASH_TIMEOUT", "1")
+	s := New(&fakeProvider{}, nil, Options{Root: t.TempDir(), Out: io.Discard})
+	res, err := s.runCodingTool(context.Background(), provider.ToolCall{Name: "bash",
+		Args: map[string]any{"command": "sleep 30"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res, "TIMED OUT") {
+		t.Fatalf("timeout not reported: %q", res)
+	}
+}
+
+// A cancelled context stops the task cleanly and leaves the session usable.
+func TestAskInterrupt(t *testing.T) {
+	fp := &fakeProvider{replies: []provider.Msg{{Role: "assistant", Content: "later"}}}
+	s := New(fp, nil, Options{Root: t.TempDir(), Out: io.Discard})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := s.Ask(ctx, "explain the code"); err == nil || !strings.Contains(err.Error(), "interrupted") {
+		t.Fatalf("want interrupted, got %v", err)
+	}
+	// Session must still work afterwards.
+	reply, err := s.Ask(context.Background(), "explain the code")
+	if err != nil || reply != "later" {
+		t.Fatalf("session unusable after interrupt: %q %v", reply, err)
+	}
+}
+
+// Without the engine (invoke==nil) mason degrades: no graph tools offered,
+// no wall, read_file falls back to a plain root-confined read.
+func TestEngineUnavailableDegradation(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "f.txt"), []byte("plain content"), 0o644)
+	fp := &fakeProvider{replies: []provider.Msg{{Role: "assistant", Content: "done"}}}
+	s := New(fp, nil, Options{Root: dir, Out: io.Discard})
+	if _, err := s.Ask(context.Background(), "rename the Status method to StatusCode"); err != nil {
+		t.Fatal(err)
+	}
+	if fp.turns[0].forced {
+		t.Fatal("wall must be disabled without the engine")
+	}
+	for _, n := range fp.turns[0].toolNames {
+		if _, isGraph := map[string]bool{"change_impact": true, "rename_plan": true}[n]; isGraph {
+			t.Fatalf("graph tool %q offered without an engine", n)
+		}
+	}
+	res, err := s.runCodingTool(context.Background(), provider.ToolCall{Name: "read_file",
+		Args: map[string]any{"path": "f.txt"}})
+	if err != nil || res != "plain content" {
+		t.Fatalf("fallback read: %q %v", res, err)
+	}
+}
+
+// Exhausting the turn budget must end in a forced wrap-up summary, not a
+// hard failure — the tree state, not the turn count, is the truth.
+func TestTurnExhaustionWrapsUp(t *testing.T) {
+	fp := &fakeProvider{replies: []provider.Msg{
+		{Role: "assistant", Calls: []provider.ToolCall{{ID: "1", Name: "grep", Args: map[string]any{"pattern": "x"}}}},
+		{Role: "assistant", Calls: []provider.ToolCall{{ID: "2", Name: "grep", Args: map[string]any{"pattern": "y"}}}},
+		{Role: "assistant", Content: "wrap-up: work was completed"},
+	}}
+	s := New(fp, nil, Options{Root: t.TempDir(), Out: io.Discard, MaxTurns: 2})
+	reply, err := s.Ask(context.Background(), "explain the code")
+	if err != nil {
+		t.Fatalf("turn exhaustion must not fail when a summary is available: %v", err)
+	}
+	if !strings.Contains(reply, "wrap-up") {
+		t.Fatalf("reply = %q", reply)
 	}
 }

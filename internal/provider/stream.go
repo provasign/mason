@@ -3,10 +3,12 @@ package provider
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // Streamer is implemented by providers that can deliver assistant text
@@ -15,16 +17,16 @@ import (
 // assembled, usage filled). Providers without streaming just don't implement
 // this — callers fall back to Chat.
 type Streamer interface {
-	ChatStream(msgs []Msg, tools []ToolDef, forceTools bool, onText func(string)) (Msg, error)
+	ChatStream(ctx context.Context, msgs []Msg, tools []ToolDef, forceTools bool, onText func(string)) (Msg, error)
 }
 
 // postStream POSTs payload and hands the response body lines to handle.
-func postStream(url string, headers map[string]string, payload any, handle func(line []byte) error) error {
+func postStream(ctx context.Context, url string, headers map[string]string, payload any, handle func(line []byte) error) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -40,7 +42,8 @@ func postStream(url string, headers map[string]string, payload any, handle func(
 	if resp.StatusCode >= 300 {
 		var b bytes.Buffer
 		_, _ = b.ReadFrom(resp.Body)
-		return fmt.Errorf("%s: HTTP %d: %s", url, resp.StatusCode, truncate(b.String(), 300))
+		return &httpError{code: resp.StatusCode,
+			msg: fmt.Sprintf("%s: HTTP %d: %s", url, resp.StatusCode, truncate(b.String(), 300))}
 	}
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 1<<16), 1<<22)
@@ -50,6 +53,28 @@ func postStream(url string, headers map[string]string, payload any, handle func(
 		}
 	}
 	return sc.Err()
+}
+
+// streamWithRetry retries a streaming call only while nothing has reached
+// the screen yet — once bytes are shown, a retry would duplicate output, so
+// the error is surfaced instead.
+func streamWithRetry(ctx context.Context, onText func(string), fn func(cb func(string)) (Msg, error)) (Msg, error) {
+	streamed := false
+	cb := func(s string) { streamed = true; onText(s) }
+	var msg Msg
+	var err error
+	for attempt, delay := 0, time.Second; attempt < 3; attempt, delay = attempt+1, delay*4 {
+		msg, err = fn(cb)
+		if err == nil || streamed || !retryable(err) {
+			return msg, err
+		}
+		select {
+		case <-ctx.Done():
+			return Msg{}, ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	return msg, err
 }
 
 // sseData strips an SSE "data:" prefix; ok is false for non-data lines.
@@ -63,7 +88,13 @@ func sseData(line []byte) (payload []byte, ok bool) {
 
 // --- Ollama streaming --------------------------------------------------------
 
-func (p *ollamaProvider) ChatStream(msgs []Msg, tools []ToolDef, forceTools bool, onText func(string)) (Msg, error) {
+func (p *ollamaProvider) ChatStream(ctx context.Context, msgs []Msg, tools []ToolDef, forceTools bool, onText func(string)) (Msg, error) {
+	return streamWithRetry(ctx, onText, func(cb func(string)) (Msg, error) {
+		return p.chatStreamOnce(ctx, msgs, tools, forceTools, cb)
+	})
+}
+
+func (p *ollamaProvider) chatStreamOnce(ctx context.Context, msgs []Msg, tools []ToolDef, forceTools bool, onText func(string)) (Msg, error) {
 	payload := p.payload(msgs, tools, forceTools)
 	payload["stream"] = true
 	out := Msg{Role: "assistant", Usage: &Usage{}}
@@ -76,7 +107,7 @@ func (p *ollamaProvider) ChatStream(msgs []Msg, tools []ToolDef, forceTools bool
 		t := strings.TrimSpace(s)
 		return t == "" || strings.HasPrefix(t, "{") || strings.HasPrefix(t, "`")
 	}
-	err := postStream(p.url+"/api/chat", nil, payload, func(line []byte) error {
+	err := postStream(ctx, p.url+"/api/chat", nil, payload, func(line []byte) error {
 		if len(bytes.TrimSpace(line)) == 0 {
 			return nil
 		}
@@ -136,7 +167,13 @@ func (p *ollamaProvider) ChatStream(msgs []Msg, tools []ToolDef, forceTools bool
 
 // --- Anthropic streaming -----------------------------------------------------
 
-func (p *anthropicProvider) ChatStream(msgs []Msg, tools []ToolDef, forceTools bool, onText func(string)) (Msg, error) {
+func (p *anthropicProvider) ChatStream(ctx context.Context, msgs []Msg, tools []ToolDef, forceTools bool, onText func(string)) (Msg, error) {
+	return streamWithRetry(ctx, onText, func(cb func(string)) (Msg, error) {
+		return p.chatStreamOnce(ctx, msgs, tools, forceTools, cb)
+	})
+}
+
+func (p *anthropicProvider) chatStreamOnce(ctx context.Context, msgs []Msg, tools []ToolDef, forceTools bool, onText func(string)) (Msg, error) {
 	payload := p.payload(msgs, tools, forceTools)
 	payload["stream"] = true
 	out := Msg{Role: "assistant", Usage: &Usage{}}
@@ -147,7 +184,7 @@ func (p *anthropicProvider) ChatStream(msgs []Msg, tools []ToolDef, forceTools b
 		json strings.Builder
 	}
 	blocks := map[int]*block{}
-	err := postStream(p.base()+"/v1/messages", map[string]string{
+	err := postStream(ctx, p.base()+"/v1/messages", map[string]string{
 		"x-api-key": p.key, "anthropic-version": "2023-06-01",
 	}, payload, func(line []byte) error {
 		data, ok := sseData(line)
@@ -218,7 +255,13 @@ func (p *anthropicProvider) ChatStream(msgs []Msg, tools []ToolDef, forceTools b
 
 // --- OpenAI streaming --------------------------------------------------------
 
-func (p *openaiProvider) ChatStream(msgs []Msg, tools []ToolDef, forceTools bool, onText func(string)) (Msg, error) {
+func (p *openaiProvider) ChatStream(ctx context.Context, msgs []Msg, tools []ToolDef, forceTools bool, onText func(string)) (Msg, error) {
+	return streamWithRetry(ctx, onText, func(cb func(string)) (Msg, error) {
+		return p.chatStreamOnce(ctx, msgs, tools, forceTools, cb)
+	})
+}
+
+func (p *openaiProvider) chatStreamOnce(ctx context.Context, msgs []Msg, tools []ToolDef, forceTools bool, onText func(string)) (Msg, error) {
 	payload := p.payload(msgs, tools, forceTools)
 	payload["stream"] = true
 	payload["stream_options"] = map[string]any{"include_usage": true}
@@ -229,7 +272,7 @@ func (p *openaiProvider) ChatStream(msgs []Msg, tools []ToolDef, forceTools bool
 	}
 	calls := map[int]*acc{}
 	maxIdx := -1
-	err := postStream(p.base()+"/v1/chat/completions", map[string]string{
+	err := postStream(ctx, p.base()+"/v1/chat/completions", map[string]string{
 		"Authorization": "Bearer " + p.key,
 	}, payload, func(line []byte) error {
 		data, ok := sseData(line)

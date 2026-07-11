@@ -86,6 +86,22 @@ half the parent's turn budget, optional cheaper model
 | Renames, signature changes, callers, missing impls, test gaps, dead code | **local 14B** — measured at the engine ceiling |
 | General editing/bugfixing | local 30B or a small API tier (haiku) |
 
+## Production behavior
+
+- **Retries**: transient provider failures (429/5xx/network) retry with
+  backoff; auth and bad-request errors fail fast. Streaming retries only
+  until the first byte has been shown.
+- **Ctrl+C** cancels the current task, not the session; the conversation
+  stays consistent and is saved.
+- **bash timeout**: one hung command cannot hang mason (default 5m,
+  `MASON_BASH_TIMEOUT` seconds to change).
+- **Path confinement**: model-supplied paths for read/edit/write/grep/list
+  cannot escape the project root.
+- **Engine-optional**: if the code graph cannot open, mason warns and runs
+  with the coding tools — it never bricks.
+- **Turn limit** ends in a forced wrap-up summary flagged for verification,
+  not a hard failure; crashes save the session before exiting.
+
 ## Credentials
 
 Resolved in order: environment variable (`ANTHROPIC_API_KEY` /

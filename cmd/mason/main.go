@@ -5,13 +5,16 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/peterh/liner"
 	"golang.org/x/term"
@@ -50,6 +53,14 @@ sessions, or logs.`
 
 func main() {
 	os.Exit(run(os.Args[1:]))
+}
+
+// interruptibleAsk runs one task; the first Ctrl+C cancels the task (the
+// session survives, ready for the next prompt), it does not kill mason.
+func interruptibleAsk(sess *agent.Session, task string) (string, error) {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return sess.Ask(ctx, task)
 }
 
 func run(args []string) int {
@@ -141,17 +152,22 @@ func run(args []string) int {
 		return 1
 	}
 	fmt.Fprintf(os.Stderr, "mason %s · %s · %s\n", version, p.Name(), root)
-	k, err := kit.Open(root)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "mason:", err)
-		return 1
-	}
-	defer k.Close()
-	// Delta-index so the graph reflects the CURRENT tree — answers from a
-	// stale graph are wrong answers. Cheap when nothing changed.
-	if _, err := k.Invoke("prism_index", map[string]any{}); err != nil {
-		fmt.Fprintln(os.Stderr, "mason: index:", err)
-		return 1
+	var invoke agent.Invoker
+	k, kerr := kit.Open(root)
+	if kerr != nil {
+		// Engine failure must not brick the agent: degrade to coding tools.
+		fmt.Fprintf(os.Stderr, "⚠ code graph unavailable (%v) — graph operations disabled this session\n", kerr)
+	} else {
+		defer k.Close()
+		// Delta-index so the graph reflects the CURRENT tree — answers from a
+		// stale graph are wrong answers. Cheap when nothing changed.
+		if _, err := k.Invoke("prism_index", map[string]any{}); err != nil {
+			fmt.Fprintf(os.Stderr, "⚠ index failed (%v) — graph operations disabled this session\n", err)
+			k.Close()
+			k = nil
+		} else {
+			invoke = k.Invoke
+		}
 	}
 
 	permit := func(action string) bool {
@@ -178,7 +194,7 @@ func run(args []string) int {
 		})
 	}
 	colorOut := term.IsTerminal(int(os.Stdout.Fd()))
-	sess := agent.New(p, k.Invoke, agent.Options{
+	sess := agent.New(p, invoke, agent.Options{
 		Root: root, MaxTurns: maxTurns, Permit: permit,
 		ProjectNotes: projectNotes(root), CtxChars: ctxChars,
 		Stream: true, Color: colorOut, NewProvider: factory,
@@ -193,8 +209,16 @@ func run(args []string) int {
 		}
 	}
 
+	defer func() {
+		if r := recover(); r != nil {
+			saveSession(sessFile, sess.History(), model)
+			fmt.Fprintf(os.Stderr, "mason: internal error (session saved): %v\n", r)
+			os.Exit(1)
+		}
+	}()
+
 	if task != "" {
-		_, err := sess.Ask(task)
+		_, err := interruptibleAsk(sess, task)
 		saveSession(sessFile, sess.History(), model)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "mason:", err)
@@ -289,7 +313,7 @@ func run(args []string) int {
 			fmt.Println("unknown command — /help for the list")
 			continue
 		}
-		_, err = sess.Ask(line)
+		_, err = interruptibleAsk(sess, line)
 		saveSession(sessFile, sess.History(), model)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "mason:", err)
@@ -334,6 +358,12 @@ type sessionFile struct {
 }
 
 func saveSession(path string, msgs []provider.Msg, model string) {
+	// Cap persisted history so the session file cannot grow without bound;
+	// the system prompt is regenerated on load, so drop it and keep the tail.
+	const keep = 400
+	if len(msgs) > keep {
+		msgs = msgs[len(msgs)-keep:]
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return
 	}
@@ -370,6 +400,9 @@ func printCost(sess *agent.Session, model string) {
 }
 
 func printSavings(k *kit.Kit) {
+	if k == nil {
+		return
+	}
 	s := k.Savings()
 	if s.OriginalTokens == 0 {
 		return

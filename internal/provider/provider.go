@@ -7,7 +7,9 @@ package provider
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -51,19 +53,58 @@ type Provider interface {
 	// Chat sends the conversation and returns the assistant's reply.
 	// forceTools requests that the model MUST call a tool this turn (the
 	// invocation wall for small local models); providers that cannot express
-	// it may ignore it.
-	Chat(msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error)
+	// it may ignore it. Cancelling ctx aborts the request.
+	Chat(ctx context.Context, msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error)
 	Name() string
+}
+
+// httpError carries the status code so the retry layer can classify.
+type httpError struct {
+	code int
+	msg  string
+}
+
+func (e *httpError) Error() string { return e.msg }
+
+// retryable reports whether an error is worth retrying: transport failures
+// and 429/5xx. Context cancellation and 4xx (auth, bad request) are not.
+func retryable(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var he *httpError
+	if errors.As(err, &he) {
+		return he.code == 429 || he.code >= 500
+	}
+	return true // transport-level (conn refused, reset, EOF)
+}
+
+// withRetry runs fn up to 3 times with 1s/4s backoff on retryable errors.
+func withRetry(ctx context.Context, fn func() (Msg, error)) (Msg, error) {
+	var msg Msg
+	var err error
+	for attempt, delay := 0, time.Second; attempt < 3; attempt, delay = attempt+1, delay*4 {
+		msg, err = fn()
+		if err == nil || !retryable(err) {
+			return msg, err
+		}
+		select {
+		case <-ctx.Done():
+			return Msg{}, ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	return msg, err
 }
 
 var httpc = &http.Client{Timeout: 10 * time.Minute}
 
-func postJSON(url string, headers map[string]string, payload any) ([]byte, error) {
+func postJSON(ctx context.Context, url string, headers map[string]string, payload any) ([]byte, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -81,7 +122,8 @@ func postJSON(url string, headers map[string]string, payload any) ([]byte, error
 		return nil, err
 	}
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("%s: HTTP %d: %s", url, resp.StatusCode, truncate(string(out), 300))
+		return nil, &httpError{code: resp.StatusCode,
+			msg: fmt.Sprintf("%s: HTTP %d: %s", url, resp.StatusCode, truncate(string(out), 300))}
 	}
 	return out, nil
 }
@@ -145,7 +187,25 @@ func scrub(err error, key string) error {
 		return nil
 	}
 	msg := strings.ReplaceAll(err.Error(), key, "[redacted]")
+	// Preserve the error's classification: losing the *httpError type here
+	// made the retry layer treat auth failures as transient (measured: a 401
+	// was retried 3 times before this was caught by TestNoRetryOn401).
+	var he *httpError
+	if errors.As(err, &he) {
+		return &httpError{code: he.code, msg: msg}
+	}
 	return fmt.Errorf("%s", msg)
+}
+
+// numCtx is Ollama's context window; MASON_NUM_CTX overrides the default.
+func numCtx() int {
+	if v := os.Getenv("MASON_NUM_CTX"); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 16384
 }
 
 func envOr(k, def string) string {
@@ -190,7 +250,7 @@ func (p *ollamaProvider) payload(msgs []Msg, tools []ToolDef, forceTools bool) m
 	}
 	payload := map[string]any{
 		"model": p.model, "messages": messages, "tools": tdefs, "stream": false,
-		"options": map[string]any{"temperature": 0, "num_ctx": 16384},
+		"options": map[string]any{"temperature": 0, "num_ctx": numCtx()},
 	}
 	if forceTools {
 		payload["tool_choice"] = "required"
@@ -198,8 +258,12 @@ func (p *ollamaProvider) payload(msgs []Msg, tools []ToolDef, forceTools bool) m
 	return payload
 }
 
-func (p *ollamaProvider) Chat(msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error) {
-	raw, err := postJSON(p.url+"/api/chat", nil, p.payload(msgs, tools, forceTools))
+func (p *ollamaProvider) Chat(ctx context.Context, msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error) {
+	return withRetry(ctx, func() (Msg, error) { return p.chatOnce(ctx, msgs, tools, forceTools) })
+}
+
+func (p *ollamaProvider) chatOnce(ctx context.Context, msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error) {
+	raw, err := postJSON(ctx, p.url+"/api/chat", nil, p.payload(msgs, tools, forceTools))
 	if err != nil {
 		return Msg{}, err
 	}
@@ -359,8 +423,12 @@ func (p *anthropicProvider) payload(msgs []Msg, tools []ToolDef, forceTools bool
 	return payload
 }
 
-func (p *anthropicProvider) Chat(msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error) {
-	raw, err := postJSON(p.base()+"/v1/messages", map[string]string{
+func (p *anthropicProvider) Chat(ctx context.Context, msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error) {
+	return withRetry(ctx, func() (Msg, error) { return p.chatOnce(ctx, msgs, tools, forceTools) })
+}
+
+func (p *anthropicProvider) chatOnce(ctx context.Context, msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error) {
+	raw, err := postJSON(ctx, p.base()+"/v1/messages", map[string]string{
 		"x-api-key": p.key, "anthropic-version": "2023-06-01",
 	}, p.payload(msgs, tools, forceTools))
 	if err != nil {
@@ -454,8 +522,12 @@ func (p *openaiProvider) payload(msgs []Msg, tools []ToolDef, forceTools bool) m
 	return payload
 }
 
-func (p *openaiProvider) Chat(msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error) {
-	raw, err := postJSON(p.base()+"/v1/chat/completions", map[string]string{
+func (p *openaiProvider) Chat(ctx context.Context, msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error) {
+	return withRetry(ctx, func() (Msg, error) { return p.chatOnce(ctx, msgs, tools, forceTools) })
+}
+
+func (p *openaiProvider) chatOnce(ctx context.Context, msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error) {
+	raw, err := postJSON(ctx, p.base()+"/v1/chat/completions", map[string]string{
 		"Authorization": "Bearer " + p.key,
 	}, p.payload(msgs, tools, forceTools))
 	if err != nil {

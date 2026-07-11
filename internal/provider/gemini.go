@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 )
@@ -14,7 +15,11 @@ type geminiProvider struct {
 
 func (p *geminiProvider) Name() string { return "gemini:" + p.model }
 
-func (p *geminiProvider) Chat(msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error) {
+func (p *geminiProvider) Chat(ctx context.Context, msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error) {
+	return withRetry(ctx, func() (Msg, error) { return p.chatOnce(ctx, msgs, tools, forceTools) })
+}
+
+func (p *geminiProvider) chatOnce(ctx context.Context, msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error) {
 	var system string
 	var contents []map[string]any
 	// callID → tool name: Gemini's functionResponse is keyed by NAME, and our
@@ -83,7 +88,7 @@ func (p *geminiProvider) Chat(msgs []Msg, tools []ToolDef, forceTools bool) (Msg
 	}
 
 	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", p.model)
-	raw, err := postJSON(url, map[string]string{"x-goog-api-key": p.key}, payload)
+	raw, err := postJSON(ctx, url, map[string]string{"x-goog-api-key": p.key}, payload)
 	if err != nil {
 		return Msg{}, scrub(err, p.key)
 	}

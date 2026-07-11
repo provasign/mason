@@ -1,11 +1,13 @@
 package agent
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/provasign/mason/internal/provider"
 )
@@ -106,12 +108,54 @@ func runGraphOp(call provider.ToolCall, invoke Invoker) (string, map[string]any,
 
 const maxToolOutput = 24_000 // chars of tool output delivered to the model
 
+// bashTimeout bounds a single bash tool call so one hung command cannot hang
+// the whole session. MASON_BASH_TIMEOUT (seconds) overrides.
+func bashTimeout() time.Duration {
+	if v := os.Getenv("MASON_BASH_TIMEOUT"); v != "" {
+		var n int
+		if _, err := fmt.Sscanf(v, "%d", &n); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 5 * time.Minute
+}
+
+// inRoot confines a model-supplied path to the project root. Symlinks and
+// ../ traversal cannot escape: the CLEANED absolute path must sit under root.
+func (s *Session) inRoot(rel string) (string, error) {
+	if rel == "" {
+		return "", fmt.Errorf("empty path")
+	}
+	abs := rel
+	if !filepath.IsAbs(rel) {
+		abs = filepath.Join(s.root, rel)
+	}
+	clean := filepath.Clean(abs)
+	root := filepath.Clean(s.root)
+	if clean != root && !strings.HasPrefix(clean, root+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q escapes the project root", rel)
+	}
+	return clean, nil
+}
+
 // runCodingTool executes a content-bearing tool and returns the model-facing
 // result string.
-func (s *Session) runCodingTool(call provider.ToolCall) (string, error) {
+func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (string, error) {
 	switch call.Name {
 	case "read_file":
 		path, _ := call.Args["path"].(string)
+		if s.invoke == nil {
+			// Engine unavailable: plain read, still root-confined.
+			abs, err := s.inRoot(path)
+			if err != nil {
+				return "", err
+			}
+			b, err := os.ReadFile(abs)
+			if err != nil {
+				return "", err
+			}
+			return truncate(string(b), maxToolOutput), nil
+		}
 		res, err := s.invoke("prism_read", map[string]any{"file": path})
 		if err != nil {
 			return "", err
@@ -125,7 +169,11 @@ func (s *Session) runCodingTool(call provider.ToolCall) (string, error) {
 		sub, _ := call.Args["path"].(string)
 		target := s.root
 		if sub != "" {
-			target = filepath.Join(s.root, sub)
+			t, err := s.inRoot(sub)
+			if err != nil {
+				return "", err
+			}
+			target = t
 		}
 		out, _ := exec.Command("grep", "-rn", "-E", "--exclude-dir=.git",
 			"--exclude-dir=.grove", "-I", pattern, target).CombinedOutput()
@@ -140,7 +188,11 @@ func (s *Session) runCodingTool(call provider.ToolCall) (string, error) {
 		filter, _ := call.Args["filter"].(string)
 		target := s.root
 		if sub != "" {
-			target = filepath.Join(s.root, sub)
+			t, err := s.inRoot(sub)
+			if err != nil {
+				return "", err
+			}
+			target = t
 		}
 		var files []string
 		_ = filepath.WalkDir(target, func(p string, d os.DirEntry, err error) error {
@@ -169,7 +221,10 @@ func (s *Session) runCodingTool(call provider.ToolCall) (string, error) {
 		if !s.permit("edit " + path) {
 			return "", fmt.Errorf("user denied edit of %s", path)
 		}
-		abs := filepath.Join(s.root, path)
+		abs, aerr := s.inRoot(path)
+		if aerr != nil {
+			return "", aerr
+		}
 		data, err := os.ReadFile(abs)
 		if err != nil {
 			return "", err
@@ -194,7 +249,10 @@ func (s *Session) runCodingTool(call provider.ToolCall) (string, error) {
 		if !s.permit("write " + path) {
 			return "", fmt.Errorf("user denied write of %s", path)
 		}
-		abs := filepath.Join(s.root, path)
+		abs, aerr := s.inRoot(path)
+		if aerr != nil {
+			return "", aerr
+		}
 		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 			return "", err
 		}
@@ -214,10 +272,15 @@ func (s *Session) runCodingTool(call provider.ToolCall) (string, error) {
 		// bash can mutate the tree (sed, git, generators) — count it, so the
 		// honesty guard never false-fires on legitimate shell-made changes.
 		s.mutated = true
-		cmd := exec.Command("sh", "-c", command)
+		cctx, cancel := context.WithTimeout(ctx, bashTimeout())
+		defer cancel()
+		cmd := exec.CommandContext(cctx, "sh", "-c", command)
 		cmd.Dir = s.root
 		out, err := cmd.CombinedOutput()
 		res := truncate(string(out), maxToolOutput)
+		if cctx.Err() == context.DeadlineExceeded {
+			return res + "\n(command TIMED OUT after " + bashTimeout().String() + ")", nil
+		}
 		if err != nil {
 			return res + "\n(exit error: " + err.Error() + ")", nil
 		}
