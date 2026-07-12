@@ -29,7 +29,9 @@ func snapshotTree(root string) string {
 
 	env := append(os.Environ(), "GIT_INDEX_FILE="+tmpIndex)
 	run := func(args ...string) (string, error) {
-		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		// Byte-exact snapshots: autocrlf must not rewrite content in either
+		// direction (Windows runners default it on).
+		cmd := exec.Command("git", append([]string{"-C", root, "-c", "core.autocrlf=false", "-c", "core.safecrlf=false"}, args...)...)
 		cmd.Env = env
 		out, err := cmd.Output()
 		return strings.TrimSpace(string(out)), err
@@ -47,7 +49,7 @@ func snapshotTree(root string) string {
 	if err != nil {
 		return ""
 	}
-	args := []string{"commit-tree", tree, "-m", "mason checkpoint"}
+	args := []string{"-c", "core.autocrlf=false", "commit-tree", tree, "-m", "mason checkpoint"}
 	if head, err := run("rev-parse", "HEAD"); err == nil {
 		args = append(args, "-p", head)
 	}
@@ -77,7 +79,7 @@ func restoreSnapshot(root, snap string) error {
 	env := append(os.Environ(), "GIT_INDEX_FILE="+tmpIndex)
 
 	git := func(args ...string) (string, error) {
-		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		cmd := exec.Command("git", append([]string{"-C", root, "-c", "core.autocrlf=false", "-c", "core.safecrlf=false"}, args...)...)
 		cmd.Env = env
 		out, err := cmd.CombinedOutput()
 		return strings.TrimSpace(string(out)), err
