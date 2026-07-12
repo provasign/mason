@@ -151,8 +151,16 @@ not a terminal). Assistant text **streams** as it is generated (Ollama,
 Anthropic, OpenAI). In either mode:
 `/model <spec>` switches models mid-conversation, `/cost` shows session
 tokens and an estimated $ figure, `/savings` the graph-read ledger,
-`/compact` summarizes old history (also automatic as context fills),
-`/plan` toggles read-only mode, `/clear`, `/help`, `/exit`.
+`/compact` condenses old history (also automatic as context fills) —
+**deterministically**: the harness builds a factual ledger of what happened
+(tasks, tool calls, result heads, replies), no summarizing model call, no
+cost, nothing misremembered. `/plan` toggles read-only mode, `/clear`,
+`/help`, `/exit`.
+
+**`code_context`** gives the model one-call task context from the graph:
+the symbols matching its terms plus their callers, callees, and tests,
+compressed to budget — replacing a chain of read_file/grep round-trips
+(measured 52% token savings vs raw reads on its first live use).
 
 **Sessions persist per repo** — every conversation is kept. `--continue`
 resumes the latest; `mason --resume` (or `/sessions` + `/resume N` inside a

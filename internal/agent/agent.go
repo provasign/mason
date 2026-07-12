@@ -34,6 +34,9 @@ search on exactly these shapes):
   by hand; the harness applies the plan.
 - "Who fails to implement X" → missing_implementations.
   "What should I test" → untested_surface. Cleanups → dead_code.
+- Starting a task that spans files → code_context FIRST: one call returns
+  the matching symbols plus callers/callees/tests, compressed. It replaces
+  a chain of read_file/grep round-trips.
 - Graph results render to the user directly; you receive only counts and
   flags. NEVER enumerate graph result sites in your own words.
 - read_file may return a short cached-pointer line for a file you already
@@ -236,35 +239,20 @@ func (s *Session) historyChars() int {
 	return n
 }
 
-// Compact summarizes everything but the last few messages into one message,
-// preserving the system prompt. Returns the chars before/after. Honors ctx —
-// compaction is a model call and can take minutes on a loaded machine, and
-// an uncancellable compaction makes Ctrl+C appear completely dead.
-func (s *Session) Compact(ctx context.Context) (before, after int, err error) {
+// Compact condenses everything but the last few messages into one digest
+// message, preserving the system prompt. DETERMINISTIC: the digest is a
+// structured ledger of what actually happened (tasks, tool calls, result
+// heads, replies) built by the harness — no model call, no cost, no
+// latency, and nothing a summarizing model could misremember. ctx is kept
+// for API compatibility; compaction no longer blocks on anything.
+func (s *Session) Compact(_ context.Context) (before, after int, err error) {
 	before = s.historyChars()
 	if len(s.msgs) < 6 {
 		return before, before, nil
 	}
 	keepTail := 3
 	head := s.msgs[1 : len(s.msgs)-keepTail]
-	var b strings.Builder
-	for _, m := range head {
-		fmt.Fprintf(&b, "[%s] %s\n", m.Role, truncate(m.Content, 2000))
-		for _, c := range m.Calls {
-			fmt.Fprintf(&b, "[%s called %s]\n", m.Role, c.Name)
-		}
-	}
-	reply, cerr := s.provider.Chat(ctx, []provider.Msg{
-		{Role: "system", Content: "You compact coding-session history. Output ONLY a dense summary: the task(s), decisions made, files read/changed, verification results, and open items. No preamble."},
-		{Role: "user", Content: b.String()},
-	}, nil, false)
-	if cerr != nil {
-		return before, before, cerr
-	}
-	if reply.Usage != nil {
-		s.usageIn += reply.Usage.In
-		s.usageOut += reply.Usage.Out
-	}
+	digest := digestHistory(head)
 	// A tool-result tail must not dangle without its assistant call turn:
 	// drop leading tool msgs from the kept tail.
 	tail := s.msgs[len(s.msgs)-keepTail:]
@@ -272,9 +260,71 @@ func (s *Session) Compact(ctx context.Context) (before, after int, err error) {
 		tail = tail[1:]
 	}
 	compacted := []provider.Msg{s.msgs[0],
-		{Role: "user", Content: "Summary of the conversation so far (older turns compacted):\n" + reply.Content}}
+		{Role: "user", Content: "Ledger of earlier turns (compacted deterministically by the harness — every line records something that actually happened):\n" + digest}}
 	s.msgs = append(compacted, tail...)
 	return before, s.historyChars(), nil
+}
+
+// digestHistory renders messages as a compact factual ledger. Budgeted:
+// when the ledger itself would bloat, the OLDEST entries collapse first —
+// recent context is worth more.
+func digestHistory(msgs []provider.Msg) string {
+	const (
+		taskChars   = 300
+		replyChars  = 240
+		resultChars = 160
+		totalChars  = 12_000
+	)
+	firstLine := func(t string) string {
+		t = strings.TrimSpace(t)
+		if i := strings.IndexByte(t, '\n'); i >= 0 {
+			t = t[:i] + " …"
+		}
+		return t
+	}
+	var entries []string
+	for _, m := range msgs {
+		switch m.Role {
+		case "user":
+			c := strings.TrimSpace(m.Content)
+			switch {
+			case strings.HasPrefix(c, "[mason attached "):
+				name := firstLine(c)
+				entries = append(entries, "· "+strings.Trim(name, "[]"))
+			case strings.HasPrefix(c, "Ledger of earlier turns"):
+				// an earlier compaction — keep its body verbatim (already dense)
+				entries = append(entries, strings.TrimPrefix(c, "Ledger of earlier turns (compacted deterministically by the harness — every line records something that actually happened):\n"))
+			default:
+				entries = append(entries, "TASK: "+truncate(firstLine(c), taskChars))
+			}
+		case "assistant":
+			for _, call := range m.Calls {
+				entries = append(entries, "→ "+call.Name+"("+truncate(compactArgs(call.Args), 100)+")")
+			}
+			if t := strings.TrimSpace(m.Content); t != "" {
+				entries = append(entries, "reply: "+truncate(firstLine(t), replyChars))
+			}
+		case "tool":
+			head := truncate(firstLine(m.Content), resultChars)
+			entries = append(entries, fmt.Sprintf("  %s ⇒ %s (%d chars)", m.Name, head, len(m.Content)))
+		}
+	}
+	// Budget: drop oldest entries first, marking the elision.
+	total := 0
+	for _, e := range entries {
+		total += len(e) + 1
+	}
+	dropped := 0
+	for len(entries) > 1 && total > totalChars {
+		total -= len(entries[0]) + 1
+		entries = entries[1:]
+		dropped++
+	}
+	out := strings.Join(entries, "\n")
+	if dropped > 0 {
+		out = fmt.Sprintf("(…%d older ledger entries elided)\n", dropped) + out
+	}
+	return out
 }
 
 // interrupted closes the current turn coherently after a cancellation: the
@@ -1030,7 +1080,7 @@ func (s *Session) treeChanged(startFP string) bool {
 func codingToolsOnly(all []provider.ToolDef) []provider.ToolDef {
 	var out []provider.ToolDef
 	for _, t := range all {
-		if _, ok := graphOps[t.Name]; ok || t.Name == "apply_rename_plan" {
+		if _, ok := graphOps[t.Name]; ok || t.Name == "apply_rename_plan" || t.Name == "code_context" {
 			continue
 		}
 		out = append(out, t)

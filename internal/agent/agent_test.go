@@ -263,9 +263,7 @@ func TestHonestyGuardSkipsReadOnly(t *testing.T) {
 // Compaction must shrink history, keep the system prompt, and never leave a
 // dangling tool-result at the head of the kept tail.
 func TestCompact(t *testing.T) {
-	fp := &fakeProvider{replies: []provider.Msg{
-		{Role: "assistant", Content: "SUMMARY OF EVERYTHING"},
-	}}
+	fp := &fakeProvider{}
 	s := New(fp, nil, Options{Root: t.TempDir(), Out: io.Discard})
 	for i := 0; i < 6; i++ {
 		s.msgs = append(s.msgs,
@@ -283,8 +281,11 @@ func TestCompact(t *testing.T) {
 	if s.msgs[0].Role != "system" {
 		t.Fatal("system prompt lost")
 	}
-	if !strings.Contains(s.msgs[1].Content, "SUMMARY OF EVERYTHING") {
-		t.Fatal("summary missing")
+	if !strings.Contains(s.msgs[1].Content, "Ledger of earlier turns") {
+		t.Fatal("digest missing")
+	}
+	if len(fp.turns) != 0 {
+		t.Fatal("compaction must be deterministic — no model call")
 	}
 	for _, m := range s.msgs {
 		if m.Role == "tool" && s.msgs[1].Role == "tool" {

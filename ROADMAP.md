@@ -43,8 +43,10 @@ Windows QA · multi-repo workspaces
   review no prompt-only tool can match.
 - **model: auto** — tier routing from our measurements: graph tasks → 14B,
   edits → 30B, hard reasoning → API tier.
-- Graph-aware compaction (deterministic context instead of model-written summaries)
-- code_context tool (prism_query compressed delivery as direct model food)
+- ✅ Graph-aware compaction (v0.20: deterministic harness-built ledger — zero model
+  calls, zero cost, nothing to misremember; oldest entries elide first)
+- ✅ code_context tool (v0.20: prism_query compressed delivery as direct model food —
+  measured 52% token savings vs raw reads on first live use)
 - Grove: free-function untested_surface (completes the gate for Python/Go)
 - Shale-backed PR descriptions with evidence-verified claims
 

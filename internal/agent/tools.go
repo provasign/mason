@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -48,6 +49,10 @@ func toolDefs() []provider.ToolDef {
 			Parameters: obj(map[string]any{})},
 
 		// --- coding tools (content delivered to the model) ---
+		{Name: "code_context", Description: "One-call task context from the code graph: the symbols matching your terms PLUS their callers, callees, and tests, compressed to fit. Use this FIRST when starting a task that spans files — it replaces a chain of read_file/grep round-trips.",
+			Parameters: obj(map[string]any{
+				"task":  str("what you are trying to do"),
+				"terms": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "symbol or keyword anchors, e.g. [\"SaveSession\"]"}}, "task", "terms")},
 		{Name: "read_file", Description: "Read a file (graph-aware, session-compressed: a repeat read of an unchanged file returns a short cached-pointer line meaning you ALREADY have the content earlier in this conversation — use that copy, do not re-request).",
 			Parameters: obj(map[string]any{"path": str("path relative to project root")}, "path")},
 		{Name: "grep", Description: "Search file CONTENTS for a pattern (regex). Use for strings/config/docs. For callers, overrides, or change-sets of a known symbol, use change_impact instead — grep misses type-resolved sites.",
@@ -165,6 +170,42 @@ func diffSnippet(oldText, newText string) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// formatCodeContext renders a prism_query result (typed struct or map —
+// normalized through JSON) as direct model food: one header line per symbol
+// with its compressed content under it, grouped in ranking order.
+func formatCodeContext(res any) string {
+	b, err := json.Marshal(res)
+	if err != nil {
+		return "(no context)"
+	}
+	var qr struct {
+		Symbols []struct {
+			QualifiedName string `json:"qualifiedName"`
+			Name          string `json:"name"`
+			FilePath      string `json:"filePath"`
+			Category      string `json:"category"`
+			Content       string `json:"content"`
+		} `json:"symbols"`
+		Note string `json:"note"`
+	}
+	if json.Unmarshal(b, &qr) != nil || len(qr.Symbols) == 0 {
+		if qr.Note != "" {
+			return "(no context: " + qr.Note + ")"
+		}
+		return "(no matching context in the graph — fall back to grep + read_file)"
+	}
+	var out strings.Builder
+	for _, sym := range qr.Symbols {
+		name := sym.QualifiedName
+		if name == "" {
+			name = sym.Name
+		}
+		fmt.Fprintf(&out, "== %s [%s] — %s\n%s\n\n", name, sym.Category, sym.FilePath,
+			strings.TrimRight(sym.Content, "\n"))
+	}
+	return truncate(strings.TrimRight(out.String(), "\n"), maxToolOutput)
+}
+
 // lspFeedback asks the language server about a just-written file and
 // formats its findings for the tool result — errors reach the model in the
 // SAME turn as the edit, not turns later through a failing build. Bounded
@@ -241,6 +282,31 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 		m, _ := res.(map[string]any)
 		content, _ := m["content"].(string)
 		return truncate(content, maxToolOutput), nil
+
+	case "code_context":
+		task, _ := call.Args["task"].(string)
+		s.setStatus("assembling context…")
+		if s.invoke == nil {
+			return "", fmt.Errorf("code graph unavailable — use read_file and grep")
+		}
+		var terms []string
+		if raw, ok := call.Args["terms"].([]any); ok {
+			for _, t := range raw {
+				if ts, ok := t.(string); ok && ts != "" {
+					terms = append(terms, ts)
+				}
+			}
+		}
+		if len(terms) == 0 {
+			return "", fmt.Errorf("code_context needs at least one term")
+		}
+		res, err := s.invoke("prism_query", map[string]any{
+			"task": task, "terms": terms, "include": []string{"graph", "tests"},
+		})
+		if err != nil {
+			return "", err
+		}
+		return formatCodeContext(res), nil
 
 	case "lookup":
 		name, _ := call.Args["name"].(string)
