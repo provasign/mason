@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -55,6 +56,13 @@ type Config struct {
 	// OpenKeyPage opens the vendor's key page in the browser (best-effort)
 	// and returns its URL for display.
 	OpenKeyPage func(vendor string) string
+	// FetchRemoteModels queries vendor's own live model-list endpoint (only
+	// called for vendors HasCred already confirms) — the full current
+	// lineup, so the picker never depends on a hand-maintained table.
+	FetchRemoteModels func(vendor string) ([]RemoteModel, error)
+	// CustomCommands are project-defined slash commands (.mason/commands)
+	// added to the autocomplete popup and /help alongside the built-ins.
+	CustomCommands []CommandInfo
 }
 
 // APIModel is one curated paid-model choice in the picker.
@@ -62,6 +70,41 @@ type APIModel struct {
 	Label  string // human name shown in the list
 	Spec   string // provider spec, e.g. "claude:claude-sonnet-5"
 	Vendor string // credential vendor: "anthropic" | "openai"
+}
+
+// RemoteModel is one live-fetched model, ready to switch to.
+type RemoteModel struct {
+	Spec  string // full provider spec, e.g. "openai:o3"
+	Label string // human-readable line for the picker
+}
+
+// CommandInfo names one slash command for the autocomplete popup and /help.
+type CommandInfo struct {
+	Name string
+	Desc string
+}
+
+// BuiltinCommands is the single source of truth for mason's built-in slash
+// commands: it drives /help, the autocomplete popup, and (via just the
+// names) the REPL's Tab-completion — one list, so they can't drift apart.
+var BuiltinCommands = []CommandInfo{
+	{"models", "list ALL models — free local, downloadable, and API — pick with /model N"},
+	{"model", "switch model — number, or a name: sonnet, haiku, opus, fable, gpt, gpt-mini"},
+	{"cost", "session token usage and cost"},
+	{"savings", "graph-read token ledger"},
+	{"compact", "condense old history (deterministic — no model call)"},
+	{"review", "engine-verified diff review (blast radius, coverage, stubs)"},
+	{"plan", "toggle read-only mode — investigate + plan, harness refuses mutations"},
+	{"sessions", "list saved conversations for this directory"},
+	{"resume", "switch to a saved conversation — /resume name <x> names this one"},
+	{"undo", "revert the file changes of the last task"},
+	{"auto", "blanket-approve bash/edit/write (or 'a' at any prompt)"},
+	{"verbose", "full tool results vs collapsed head + '+N more'"},
+	{"secrets", "toggle secret redaction (default on)"},
+	{"mouse", "toggle mouse capture — off enables native text selection"},
+	{"clear", "drop the conversation"},
+	{"help", "show this list"},
+	{"exit", "quit (Ctrl+C when idle also quits)"},
 }
 
 // UI owns the event channel shared with the agent goroutine.
@@ -127,6 +170,11 @@ type (
 		reply string
 		err   error
 	}
+	remoteModelsMsg struct {
+		vendor string
+		models []RemoteModel
+		err    error
+	}
 )
 
 var (
@@ -176,14 +224,24 @@ type uiModel struct {
 	planOn      bool    // /plan — read-only mode indicator
 	// /models pick lists: 1..len(pickInstalled) switch instantly, the next
 	// numbers download via ExecProcess, the numbers after those are API
-	// models (key entry guided in-TUI when the credential is missing).
+	// models (key entry guided in-TUI when the credential is missing), and
+	// any further numbers are live-fetched models for vendors already
+	// keyed (see pickRemote).
 	pickInstalled []string
 	pickDownload  []localmodels.Model
 	pickAPI       []APIModel
+	pickRemote    []RemoteModel
 	// awaitKey is non-nil while the input box is collecting an API key
 	// (masked) for the picked model; Esc cancels.
 	awaitKey *APIModel
 	keyIn    textinput.Model
+	mouseOn  bool // /mouse — off releases the terminal's native text selection
+	// Slash-command autocomplete: recomputed on every keystroke while the
+	// input is an in-progress "/word" with no space yet.
+	suggestOpen  bool
+	suggestions  []CommandInfo
+	suggestIdx   int
+	suggestLines int // current popup height, subtracted from the viewport
 }
 
 func newModel(u *UI, cfg Config) uiModel {
@@ -195,7 +253,7 @@ func newModel(u *UI, cfg Config) uiModel {
 	in.Focus()
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	return uiModel{ui: u, cfg: cfg, in: in, sp: sp, model: cfg.ModelName,
-		planOn: cfg.PlanOn, buf: &strings.Builder{}}
+		planOn: cfg.PlanOn, mouseOn: true, buf: &strings.Builder{}}
 }
 
 // syncInputHeight grows the textarea with its content, counting soft-wrapped
@@ -222,10 +280,10 @@ func (m *uiModel) syncInputHeight() {
 	}
 }
 
-// layout recomputes the viewport height from the current terminal size and
-// input height.
+// layout recomputes the viewport height from the current terminal size,
+// input height, and any open autocomplete popup.
 func (m *uiModel) layout() {
-	vh := m.tall - 3 - m.in.Height() // header, status, prompt block
+	vh := m.tall - 3 - m.in.Height() - m.suggestLines // header, status, prompt block
 	if vh < 3 {
 		vh = 3
 	}
@@ -332,7 +390,23 @@ func (m uiModel) View() string {
 	if m.perm != nil {
 		prompt = permStyle.Render(fmt.Sprintf(" allow? %s  [y/n/a=always]", m.perm.action))
 	}
-	return header + "\n" + m.vp.View() + "\n" + prompt + "\n" + m.statusLine()
+	suggestBox := ""
+	if m.suggestOpen {
+		var sb strings.Builder
+		for i, c := range m.suggestions {
+			line := "/" + c.Name
+			if c.Desc != "" {
+				line += " — " + c.Desc
+			}
+			if i == m.suggestIdx {
+				sb.WriteString(permStyle.Render("▸ "+line) + "\n")
+			} else {
+				sb.WriteString(statusStyle.Render("  "+line) + "\n")
+			}
+		}
+		suggestBox = sb.String()
+	}
+	return header + "\n" + m.vp.View() + "\n" + suggestBox + prompt + "\n" + m.statusLine()
 }
 
 func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -350,7 +424,7 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.ready {
 			m.vp = viewport.New(msg.Width, 3)
 			m.ready = true
-			m.append(fmt.Sprintf("welcome — model %s · /models to switch · /help for commands\n", m.model))
+			m.append(fmt.Sprintf("welcome — model %s · /models to switch · /help for commands · Shift+drag or /mouse off to select text\n", m.model))
 		}
 		m.inWidth = msg.Width - 6 // textarea chrome (prompt gutter) eats columns
 		m.in.SetWidth(msg.Width - 2)
@@ -400,6 +474,25 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	// NOTE: pullDoneMsg arrives via ExecProcess (tea-internal), not the
 	// events channel, so it does not consume the listener.
+
+	case remoteModelsMsg:
+		if msg.err != nil {
+			m.append(errStyle.Render(fmt.Sprintf("live %s model list: %v", msg.vendor, msg.err)) + "\n")
+			return m, nil
+		}
+		if len(msg.models) == 0 {
+			return m, nil
+		}
+		base := len(m.pickInstalled) + len(m.pickDownload) + len(m.pickAPI) + len(m.pickRemote)
+		var b strings.Builder
+		fmt.Fprintf(&b, "API — every current %s model (live from the API):\n", msg.vendor)
+		for _, rm := range msg.models {
+			base++
+			m.pickRemote = append(m.pickRemote, rm)
+			fmt.Fprintf(&b, "  %d. %s\n", base, rm.Label)
+		}
+		m.append(b.String())
+		return m, nil
 
 	case doneMsg:
 		m.busy = false
@@ -459,6 +552,32 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		// Slash-command autocomplete swallows navigation/accept keys while
+		// a popup is open; anything else falls through to normal typing
+		// (which recomputes/narrows or closes the popup below).
+		if m.suggestOpen {
+			switch msg.String() {
+			case "up":
+				if m.suggestIdx > 0 {
+					m.suggestIdx--
+				}
+				return m, nil
+			case "down":
+				if m.suggestIdx < len(m.suggestions)-1 {
+					m.suggestIdx++
+				}
+				return m, nil
+			case "tab", "enter":
+				m.applySuggestion()
+				return m, nil
+			case "esc":
+				m.suggestOpen = false
+				m.suggestions = nil
+				m.suggestLines = 0
+				m.layout()
+				return m, nil
+			}
+		}
 		switch msg.String() {
 		case "ctrl+c":
 			if m.busy && m.cancel != nil {
@@ -485,6 +604,7 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Insert a literal newline into the input.
 			var cmd tea.Cmd
 			m.in, cmd = m.in.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			m.updateSuggestions()
 			m.syncInputHeight()
 			return m, cmd
 		case "enter":
@@ -510,8 +630,60 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.in, cmd = m.in.Update(msg)
+	m.updateSuggestions()
 	m.syncInputHeight()
 	return m, cmd
+}
+
+// updateSuggestions recomputes the autocomplete popup from the current
+// input: open only while the line is an in-progress "/word" (no space yet,
+// so a chosen command's arguments never re-trigger it).
+func (m *uiModel) updateSuggestions() {
+	v := m.in.Value()
+	if !strings.HasPrefix(v, "/") || strings.ContainsAny(v, " \n\t") {
+		m.suggestOpen, m.suggestions, m.suggestLines = false, nil, 0
+		m.layout()
+		return
+	}
+	q := strings.ToLower(v[1:])
+	all := append(append([]CommandInfo{}, BuiltinCommands...), m.cfg.CustomCommands...)
+	var matches []CommandInfo
+	for _, c := range all {
+		if strings.HasPrefix(strings.ToLower(c.Name), q) {
+			matches = append(matches, c)
+		}
+	}
+	sort.Slice(matches, func(i, j int) bool { return matches[i].Name < matches[j].Name })
+	if len(matches) == 0 || (len(matches) == 1 && strings.EqualFold(matches[0].Name, q)) {
+		m.suggestOpen, m.suggestions, m.suggestLines = false, nil, 0
+		m.layout()
+		return
+	}
+	const maxSuggest = 6
+	if len(matches) > maxSuggest {
+		matches = matches[:maxSuggest]
+	}
+	m.suggestions = matches
+	if m.suggestIdx >= len(matches) {
+		m.suggestIdx = 0
+	}
+	m.suggestOpen = true
+	m.suggestLines = len(matches)
+	m.layout()
+}
+
+// applySuggestion fills the highlighted command into the input (with a
+// trailing space for arguments) and closes the popup; it does not submit —
+// a second Enter runs it, matching how a filled command needs its args.
+func (m *uiModel) applySuggestion() {
+	if len(m.suggestions) == 0 {
+		return
+	}
+	pick := m.suggestions[m.suggestIdx]
+	m.in.SetValue("/" + pick.Name + " ")
+	m.in.CursorEnd()
+	m.suggestOpen, m.suggestions, m.suggestLines, m.suggestIdx = false, nil, 0, 0
+	m.layout()
 }
 
 // startKeyEntry switches the input box into masked API-key collection for
@@ -573,30 +745,36 @@ func (m uiModel) command(line string) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Quit
 	case "/help":
-		m.append(`
-commands:
-  /models        list ALL models — free local, downloadable, and API — pick with /model N
-  /model N       switch to model number N (API picks guide you through the key once)
-  /model <name>  switch by name: sonnet · haiku · opus · gpt · gpt-mini · any full spec
-  /cost          session token usage and cost
-  /savings       graph-read token ledger
-  /compact       summarize old history
-  /review [base] engine-verified diff review (blast radius, coverage, stubs)
-  /plan [off]    read-only mode: investigate + plan, harness refuses mutations
-  /sessions      list saved conversations for this directory
-  /resume N      switch to saved conversation N — /resume name <x> names this one
-  /undo          revert the file changes of the last task (checkpointed per task)
-  /auto [off]    blanket-approve bash/edit/write (or 'a' at any prompt)
-  /verbose [off] full tool results (default: collapsed to a head + '+N more')
-  /secrets [off] secret redaction (default on)
-  /clear         drop the conversation
-  /exit          quit (Ctrl+C when idle also quits)
-keys: mouse wheel or PgUp/PgDn scroll (Shift+drag to select text) · Ctrl+C cancels a running task
-`)
+		var b strings.Builder
+		b.WriteString("\ncommands (type / for a live autocomplete popup):\n")
+		width := 0
+		for _, c := range BuiltinCommands {
+			if len(c.Name) > width {
+				width = len(c.Name)
+			}
+		}
+		for _, c := range BuiltinCommands {
+			fmt.Fprintf(&b, "  /%-*s  %s\n", width, c.Name, c.Desc)
+		}
+		b.WriteString("keys: mouse wheel or PgUp/PgDn scroll · Shift+drag to select text (or /mouse off for native selection) · Ctrl+C cancels a running task\n")
+		m.append(b.String())
 		if m.cfg.ExtraHelp != "" {
 			m.append(m.cfg.ExtraHelp)
 		}
 		return m, nil
+	case "/mouse":
+		arg := ""
+		if len(fields) > 1 {
+			arg = fields[1]
+		}
+		if arg == "off" {
+			m.mouseOn = false
+			m.append("mouse capture OFF — drag to select text natively; scroll wheel is disabled, use PgUp/PgDn (/mouse on to re-enable)\n")
+			return m, tea.DisableMouse
+		}
+		m.mouseOn = true
+		m.append("mouse capture ON — scroll wheel works again; hold Shift while dragging to select text, or /mouse off\n")
+		return m, tea.EnableMouseCellMotion
 	case "/cost":
 		in, out, cost := m.cfg.Usage()
 		m.append(fmt.Sprintf("usage: %d in / %d out tokens ≈ $%.4f\n", in, out, cost))
@@ -790,6 +968,7 @@ keys: mouse wheel or PgUp/PgDn scroll (Shift+drag to select text) · Ctrl+C canc
 		m.pickInstalled = st.Installed
 		m.pickDownload = nil
 		m.pickAPI = m.cfg.APIModels
+		m.pickRemote = nil
 		installed := st.InstalledSet()
 		var b strings.Builder
 		b.WriteString("\nfree local — installed, /model N switches:\n")
@@ -807,7 +986,7 @@ keys: mouse wheel or PgUp/PgDn scroll (Shift+drag to select text) · Ctrl+C canc
 		}
 		n = len(st.Installed) + len(m.pickDownload)
 		if len(m.pickAPI) > 0 {
-			b.WriteString("API — /model N switches (mason guides you through the key on first use):\n")
+			b.WriteString("API — recommended, /model N switches (mason guides you through the key on first use):\n")
 			for _, am := range m.pickAPI {
 				n++
 				status := "needs API key — mason will walk you through it"
@@ -818,6 +997,28 @@ keys: mouse wheel or PgUp/PgDn scroll (Shift+drag to select text) · Ctrl+C canc
 			}
 		}
 		m.append(b.String())
+		// Live-augment: query each already-keyed vendor's own model list so
+		// the picker never depends on a hand-maintained table going stale.
+		if m.cfg.FetchRemoteModels != nil && m.cfg.HasCred != nil {
+			seen := map[string]bool{}
+			var cmds []tea.Cmd
+			for _, am := range m.pickAPI {
+				if seen[am.Vendor] || !m.cfg.HasCred(am.Vendor) {
+					continue
+				}
+				seen[am.Vendor] = true
+				vendor := am.Vendor
+				fetch := m.cfg.FetchRemoteModels
+				cmds = append(cmds, func() tea.Msg {
+					models, err := fetch(vendor)
+					return remoteModelsMsg{vendor: vendor, models: models, err: err}
+				})
+			}
+			if len(cmds) > 0 {
+				m.append(statusStyle.Render("  fetching the full model list from your provider(s)…") + "\n")
+				return m, tea.Batch(cmds...)
+			}
+		}
 		return m, nil
 	case "/model":
 		if len(fields) < 2 {
@@ -832,6 +1033,7 @@ keys: mouse wheel or PgUp/PgDn scroll (Shift+drag to select text) · Ctrl+C canc
 				m.pickAPI = m.cfg.APIModels
 			}
 			apiBase := len(m.pickInstalled) + len(m.pickDownload)
+			curatedEnd := apiBase + len(m.pickAPI)
 			switch {
 			case n >= 1 && n <= len(m.pickInstalled):
 				spec = "ollama:" + m.pickInstalled[n-1]
@@ -844,13 +1046,15 @@ keys: mouse wheel or PgUp/PgDn scroll (Shift+drag to select text) · Ctrl+C canc
 				return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 					return pullDoneMsg{tag: pick.Tag, err: err}
 				})
-			case n > apiBase && n <= apiBase+len(m.pickAPI):
+			case n > apiBase && n <= curatedEnd:
 				pick := m.pickAPI[n-1-apiBase]
 				if m.cfg.HasCred != nil && m.cfg.HasCred(pick.Vendor) {
 					spec = pick.Spec
 					break
 				}
 				return m.startKeyEntry(pick)
+			case n > curatedEnd && n <= curatedEnd+len(m.pickRemote):
+				spec = m.pickRemote[n-1-curatedEnd].Spec
 			default:
 				m.append(errStyle.Render("no model #"+fields[1]+" — see /models") + "\n")
 				return m, nil

@@ -64,7 +64,8 @@ flags:
   --max-turns <n>  per-task turn budget (default: 60 local, 30 API; 0 = unlimited)
 
 REPL commands: /models  /model <spec>  /plan  /sessions  /resume N  /cost  /savings
-               /compact  /clear  /help  /exit
+               /compact  /clear  /help  /exit  (Tab-completes; the full-screen TUI adds
+               a live autocomplete popup and /mouse to toggle native text selection)
 
 Project instructions: AGENTS.md and MASON.md at the root are loaded into the
 system prompt automatically.
@@ -639,16 +640,32 @@ func run(args []string) int {
 				}
 				return fmt.Sprintf("resumed %q — %d messages", metas[n-1].Label, len(sf.Messages)), nil
 			},
-			SaveSession:   func() { saveSession(sessFile, sess.History(), model, sessName) },
-			ExpandCommand: func(line string) (string, bool) { return expandCommand(root, line) },
-			ExtraHelp:     commandsHelp(root),
-			APIModels:     apiCatalog,
-			HasCred:       creds.Has,
-			StoreCred:     creds.Store,
-			ResolveAlias:  resolveModelAlias,
+			SaveSession:    func() { saveSession(sessFile, sess.History(), model, sessName) },
+			ExpandCommand:  func(line string) (string, bool) { return expandCommand(root, line) },
+			ExtraHelp:      commandsHelp(root),
+			CustomCommands: customCommandInfos(root),
+			APIModels:      apiCatalog,
+			HasCred:        creds.Has,
+			StoreCred:      creds.Store,
+			ResolveAlias:   resolveModelAlias,
 			OpenKeyPage: func(vendor string) string {
 				url, _ := creds.OpenKeyPage(vendor)
 				return url
+			},
+			FetchRemoteModels: func(vendor string) ([]tui.RemoteModel, error) {
+				models, err := fetchRemoteModels(vendor)
+				if err != nil {
+					return nil, err
+				}
+				if len(models) > maxRemoteShown {
+					models = models[:maxRemoteShown]
+				}
+				prefix := vendorSpecPrefix(vendor)
+				out := make([]tui.RemoteModel, 0, len(models))
+				for _, rm := range models {
+					out = append(out, tui.RemoteModel{Spec: prefix + rm.ID, Label: rm.Label()})
+				}
+				return out, nil
 			},
 		})
 		if err != nil {
@@ -664,9 +681,23 @@ func run(args []string) int {
 	// Ctrl+C-cancels-line without aborting the session.
 	var pickInstalled []string
 	var pickDownload []localmodels.Model
+	var pickRemote []remotePick
 	fmt.Println(`type a task — /help for commands, /exit to quit`)
 	rl := liner.NewLiner()
 	rl.SetCtrlCAborts(true)
+	rl.SetCompleter(func(line string) []string {
+		if !strings.HasPrefix(line, "/") {
+			return nil
+		}
+		q := strings.ToLower(line[1:])
+		var out []string
+		for _, name := range append(replCommandNames(), listCommands(root)...) {
+			if strings.HasPrefix(name, q) {
+				out = append(out, "/"+name)
+			}
+		}
+		return out
+	})
 	histPath := filepath.Join(cacheBase(), "mason", "history")
 	if f, err := os.Open(histPath); err == nil {
 		_, _ = rl.ReadHistory(f)
@@ -765,7 +796,7 @@ func run(args []string) int {
 			continue
 		case line == "/models":
 			var text string
-			text, pickInstalled, pickDownload = renderModelList()
+			text, pickInstalled, pickDownload, pickRemote = renderModelList()
 			fmt.Println("\n" + text)
 			continue
 		case strings.HasPrefix(line, "/model"):
@@ -776,9 +807,10 @@ func run(args []string) int {
 			}
 			if n, err := strconv.Atoi(spec); err == nil {
 				if pickInstalled == nil && pickDownload == nil {
-					_, pickInstalled, pickDownload = renderModelList()
+					_, pickInstalled, pickDownload, pickRemote = renderModelList()
 				}
 				apiBase := len(pickInstalled) + len(pickDownload)
+				curatedEnd := apiBase + len(apiCatalog)
 				switch {
 				case n >= 1 && n <= len(pickInstalled):
 					spec = "ollama:" + pickInstalled[n-1]
@@ -792,8 +824,10 @@ func run(args []string) int {
 						continue
 					}
 					spec = "ollama:" + pick.Tag
-				case n > apiBase && n <= apiBase+len(apiCatalog):
+				case n > apiBase && n <= curatedEnd:
 					spec = apiCatalog[n-1-apiBase].Spec
+				case n > curatedEnd && n <= curatedEnd+len(pickRemote):
+					spec = pickRemote[n-1-curatedEnd].Spec
 				default:
 					fmt.Println("no model #" + spec + " — see /models")
 					continue

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/provasign/mason/internal/tui"
 )
 
 // Custom slash commands: every .mason/commands/<name>.md becomes /<name>.
@@ -67,4 +69,33 @@ func commandsHelp(root string) string {
 		return ""
 	}
 	return fmt.Sprintf("custom commands (.mason/commands/): /%s\n", strings.Join(names, "  /"))
+}
+
+// customCommandInfos builds {name, desc} entries for the TUI's slash-command
+// autocomplete popup: desc is the template's first line, truncated.
+func customCommandInfos(root string) []tui.CommandInfo {
+	var out []tui.CommandInfo
+	for _, name := range listCommands(root) {
+		tpl, _ := loadCommand(root, name)
+		desc := strings.TrimSpace(tpl)
+		if i := strings.IndexByte(desc, '\n'); i >= 0 {
+			desc = desc[:i]
+		}
+		if len(desc) > 60 {
+			desc = desc[:60] + "…"
+		}
+		out = append(out, tui.CommandInfo{Name: name, Desc: desc})
+	}
+	return out
+}
+
+// replCommandNames names mason's built-in slash commands for the REPL's
+// Tab-completer — sourced from tui.BuiltinCommands so the two surfaces
+// (TUI popup, REPL completion) can never drift apart.
+func replCommandNames() []string {
+	names := make([]string, len(tui.BuiltinCommands))
+	for i, c := range tui.BuiltinCommands {
+		names[i] = c.Name
+	}
+	return names
 }

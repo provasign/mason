@@ -156,14 +156,29 @@ Model auto-detection: best installed local model first (catalog order),
 then any installed local model, then Anthropic, then OpenAI.
 
 **Nobody types model IDs.** `/models` shows ONE numbered list — installed
-local models, downloadable local models, and a curated API shortlist
-(Claude Sonnet/Haiku/Opus, GPT-4.1/-mini) — and `/model N` switches.
-Friendly names work everywhere a spec does: `--model sonnet`,
-`/model haiku`. Picking an API model without a stored key starts a guided
-setup right there: the vendor's key page opens in your browser, you paste
-the key (input hidden — in the TUI it's collected masked in the input box),
-and it lands only in the OS keychain (macOS Keychain / Windows Credential
+local models, downloadable local models, a curated API shortlist (Claude
+Fable/Sonnet/Haiku/Opus, GPT-4.1/-mini), and — for any vendor you've
+already keyed — **every current model straight from that vendor's own
+live model-list API**, so the picker can never go stale the way a
+hand-maintained table would. Friendly names work everywhere a spec does:
+`--model sonnet`, `/model haiku`, `fable`, `opus`, `gpt`, `gpt-mini`.
+Picking an API model without a stored key starts a guided setup right
+there: the vendor's key page opens in your browser, you paste the key
+(input hidden — in the TUI it's collected masked in the input box), and
+it lands only in the OS keychain (macOS Keychain / Windows Credential
 Manager / Linux Secret Service). Next time it just switches.
+
+**Slash-command autocomplete.** Type `/` in the TUI and a popup lists
+every matching command — built-in and project-defined (`.mason/commands/`)
+— with a one-line description, narrowing as you type. ↑/↓ moves the
+highlight, Tab/Enter fills it in (a second Enter runs it — the filled
+command still needs its arguments), Esc dismisses. The line-mode REPL
+gets the same command set via Tab-completion.
+
+**Native text selection.** The TUI captures the mouse for wheel-scrolling,
+which normally means you need Shift+drag to select text. `/mouse off`
+releases mouse capture — drag-select works exactly like a normal terminal
+(PgUp/PgDn still scroll); `/mouse on` (or `/mouse`) re-enables the wheel.
 
 Works on an existing repo or an **empty directory** — "start a brand new Go
 project with a module, a package, and tests" scaffolds, builds, and tests a
