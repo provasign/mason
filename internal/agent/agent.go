@@ -36,7 +36,11 @@ search on exactly these shapes):
   "What should I test" → untested_surface. Cleanups → dead_code.
 - Starting a task that spans files → code_context FIRST: one call returns
   the matching symbols plus callers/callees/tests, compressed. It replaces
-  a chain of read_file/grep round-trips.
+  a chain of read_file/grep round-trips. EXCEPTION: renames, signature
+  changes, and deprecations — rename_plan / change_impact are already the
+  complete answer; calling code_context for those wastes turns.
+- A rename is a THREE-CALL procedure: rename_plan → apply_rename_plan →
+  verify with bash. Nothing else. No reading files, no checking the plan.
 - Graph results render to the user directly; you receive only counts and
   flags. NEVER enumerate graph result sites in your own words.
 - read_file may return a short cached-pointer line for a file you already
@@ -132,6 +136,13 @@ type Session struct {
 	msgs     []provider.Msg
 
 	lastRenamePlan map[string]any
+	// Rename wall state (per task): a produced plan must be APPLIED next,
+	// and while ambiguous edits are pending the toolset stays restricted to
+	// apply+bash — measured: with a polluted context a 30B ignores the
+	// textual "call apply_rename_plan again" instruction and hand-edits 9
+	// files one by one (the pre-v0.3.1 pathology back from the dead).
+	renamePlanPending   bool // plan produced, not yet applied at all
+	renameAmbiguousLeft int  // ambiguous edits not yet applied
 	checkpoints    []string // snapshot commits, newest last (/undo)
 	pendingNote    string   // folded into the next task message (e.g. undo notice)
 	pendingImages     []provider.Image // queued by --image for the next task
@@ -439,6 +450,8 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 		}
 	}
 	s.mutated = false
+	s.renamePlanPending = false
+	s.renameAmbiguousLeft = 0
 	nudged := false
 	refusalNudged := false
 	groundingNudged := false
@@ -489,11 +502,32 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 		var reply provider.Msg
 		var shown bool
 		var err error
-		if wall && turn == 0 {
+		// allowed restricts which calls EXECUTE this turn (nil = all).
+		// Offering a restricted set is not enough: local providers do not
+		// strictly honor tool lists, and a model can name any tool in its
+		// reply — the wall must hold at dispatch or it is theater
+		// (measured: a 30B called rename_plan mid-wall, re-planned the
+		// wrong symbol, and burned its whole budget un-renaming the tree).
+		var allowed map[string]bool
+		switch {
+		// Rename wall: a produced plan is APPLIED next — the only tool on
+		// offer is apply_rename_plan, forced. While ambiguous edits remain,
+		// the set stays {apply_rename_plan, bash} so "fix the build" can
+		// only mean the one call that heals every pending site — hand-edit
+		// spirals are structurally impossible, not merely discouraged.
+		case s.renamePlanPending:
+			restricted := filterToolsByName(tools, "apply_rename_plan")
+			allowed = nameSet(restricted)
+			reply, shown, err = s.chat(ctx, restricted, true)
+		case s.renameAmbiguousLeft > 0:
+			restricted := filterToolsByName(tools, "apply_rename_plan", "bash")
+			allowed = nameSet(restricted)
+			reply, shown, err = s.chat(ctx, restricted, false)
+		case wall && turn == 0:
 			reply, shown, err = s.chat(ctx, graphOnly, true)
-		} else if wallAny && turn == 0 {
+		case wallAny && turn == 0:
 			reply, shown, err = s.chat(ctx, tools, true)
-		} else {
+		default:
 			reply, shown, err = s.chat(ctx, tools, false)
 		}
 		if err != nil {
@@ -641,6 +675,15 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 		s.msgs = append(s.msgs, reply)
 
 		for _, call := range reply.Calls {
+			if allowed != nil && !allowed[call.Name] {
+				fmt.Fprintf(s.out, "  %s\n", s.st.yellow("⛔ "+call.Name+" refused — rename plan pending"))
+				s.msgs = append(s.msgs, provider.Msg{Role: "tool", CallID: call.ID, Name: call.Name,
+					Content: "error: " + call.Name + " is not available while a rename plan is pending. " +
+						"Call apply_rename_plan NOW (includeAmbiguous=true if the build failed on the " +
+						"renamed symbol) — it applies every remaining edit in one call. Do not re-plan, " +
+						"do not read files, do not edit by hand."})
+				continue
+			}
 			toolsRan++
 			if call.Name == "bash" {
 				if cmdStr, _ := call.Args["command"].(string); testRunRe.MatchString(cmdStr) {
@@ -693,6 +736,8 @@ func (s *Session) dispatch(ctx context.Context, call provider.ToolCall, tr *trai
 		}
 		if call.Name == "rename_plan" {
 			s.lastRenamePlan = full
+			s.renamePlanPending = true
+			s.renameAmbiguousLeft = len(asSlice(full["ambiguous"]))
 		}
 		render(s.out, call, full, s.st, s.opts.CompactRender)
 		tr.Note("prism %s: %s", call.Name, meta)
@@ -725,6 +770,8 @@ func (s *Session) dispatch(ctx context.Context, call provider.ToolCall, tr *trai
 			return "", err
 		}
 		s.mutated = true
+		s.renamePlanPending = false
+		s.renameAmbiguousLeft = ambLeft
 		tr.Note("applied rename plan (ambiguous=%v)", includeAmbiguous)
 		// The model must know the FULL apply state — especially the ambiguous
 		// remainder. Without this it hand-fixes the leftover callers one by
@@ -1087,6 +1134,30 @@ func codingToolsOnly(all []provider.ToolDef) []provider.ToolDef {
 			continue
 		}
 		out = append(out, t)
+	}
+	return out
+}
+
+// nameSet indexes tool definitions by name for dispatch-time enforcement.
+func nameSet(tools []provider.ToolDef) map[string]bool {
+	m := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		m[t.Name] = true
+	}
+	return m
+}
+
+// filterToolsByName keeps only the named tools (order preserved).
+func filterToolsByName(all []provider.ToolDef, names ...string) []provider.ToolDef {
+	keep := map[string]bool{}
+	for _, n := range names {
+		keep[n] = true
+	}
+	var out []provider.ToolDef
+	for _, t := range all {
+		if keep[t.Name] {
+			out = append(out, t)
+		}
 	}
 	return out
 }

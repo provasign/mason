@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -49,7 +50,7 @@ func toolDefs() []provider.ToolDef {
 			Parameters: obj(map[string]any{})},
 
 		// --- coding tools (content delivered to the model) ---
-		{Name: "code_context", Description: "One-call task context from the code graph: the symbols matching your terms PLUS their callers, callees, and tests, compressed to fit. Use this FIRST when starting a task that spans files — it replaces a chain of read_file/grep round-trips.",
+		{Name: "code_context", Description: "One-call task context from the code graph: the symbols matching your terms PLUS their callers, callees, and tests, compressed to fit. Use this FIRST when starting a task that spans files — it replaces a chain of read_file/grep round-trips. Do NOT use it for renames, signature changes, or deprecations: rename_plan and change_impact already return the COMPLETE set for those.",
 			Parameters: obj(map[string]any{
 				"task":  str("what you are trying to do"),
 				"terms": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "symbol or keyword anchors, e.g. [\"SaveSession\"]"}}, "task", "terms")},
@@ -114,6 +115,10 @@ func runGraphOp(call provider.ToolCall, invoke Invoker) (string, map[string]any,
 }
 
 const maxToolOutput = 24_000 // chars of tool output delivered to the model
+
+// buildVerifyRe recognizes bash commands that verify the tree compiles or
+// passes tests — a green one releases the rename wall.
+var buildVerifyRe = regexp.MustCompile(`\b(go (build|vet|test)|cargo (build|check|test)|mvn|gradle|make|npm (run )?(build|test)|yarn (build|test)|pytest|tsc)\b`)
 
 // bashTimeout bounds a single bash tool call so one hung command cannot hang
 // the whole session. MASON_BASH_TIMEOUT (seconds) overrides.
@@ -504,6 +509,11 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 		}
 		if err != nil {
 			return res + "\n(exit error: " + err.Error() + ")" + hookResultSuffix(preWarns), nil
+		}
+		// A green build/test is the natural end of a rename: release the
+		// rename wall so multi-part tasks get their full toolset back.
+		if s.renameAmbiguousLeft > 0 && buildVerifyRe.MatchString(command) {
+			s.renameAmbiguousLeft = 0
 		}
 		if strings.TrimSpace(res) == "" {
 			return "(no output, exit 0)" + hookResultSuffix(preWarns), nil
