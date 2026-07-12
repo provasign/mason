@@ -104,7 +104,7 @@ var BuiltinCommands = []CommandInfo{
 	{"auto", "blanket-approve bash/edit/write (or 'a' at any prompt)"},
 	{"verbose", "full tool results vs collapsed head + '+N more'"},
 	{"secrets", "toggle secret redaction (default on)"},
-	{"mouse", "toggle mouse capture — off enables native text selection"},
+	{"mouse", "mouse wheel scroll — on captures the wheel (blocks native text selection); off is the default"},
 	{"clear", "drop the conversation"},
 	{"help", "show this list"},
 	{"exit", "quit (Ctrl+C when idle also quits)"},
@@ -260,7 +260,7 @@ func newModel(u *UI, cfg Config) uiModel {
 	in.Focus()
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	return uiModel{ui: u, cfg: cfg, in: in, sp: sp, model: cfg.ModelName,
-		planOn: cfg.PlanOn, mouseOn: true, buf: &strings.Builder{}}
+		planOn: cfg.PlanOn, mouseOn: false, buf: &strings.Builder{}}
 }
 
 // syncInputHeight grows the textarea with its content, counting soft-wrapped
@@ -304,7 +304,10 @@ func (m *uiModel) layout() {
 // for wheel scrolling (terminal text selection needs Shift+drag while a
 // mouse-enabled TUI runs — the standard trade-off).
 func (u *UI) Run(cfg Config) error {
-	p := tea.NewProgram(newModel(u, cfg), tea.WithAltScreen(), tea.WithMouseCellMotion())
+	// Mouse capture starts OFF so native terminal text selection / copy works
+	// out of the box (a coding tool where you copy code constantly). Wheel
+	// scrolling is opt-in via /mouse on; PgUp/PgDn scroll either way.
+	p := tea.NewProgram(newModel(u, cfg), tea.WithAltScreen())
 	_, err := p.Run()
 	return err
 }
@@ -431,7 +434,7 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.ready {
 			m.vp = viewport.New(msg.Width, 3)
 			m.ready = true
-			m.append(fmt.Sprintf("welcome — model %s · /model to switch · /help for commands · Shift+drag or /mouse off to select text\n", m.model))
+			m.append(fmt.Sprintf("welcome — model %s · /model to switch · /help for commands · select text to copy as usual · /mouse on for wheel scroll\n", m.model))
 		}
 		m.inWidth = msg.Width - 6 // textarea chrome (prompt gutter) eats columns
 		m.in.SetWidth(msg.Width - 2)
@@ -807,7 +810,7 @@ func (m uiModel) command(line string) (tea.Model, tea.Cmd) {
 		for _, c := range BuiltinCommands {
 			fmt.Fprintf(&b, "  /%-*s  %s\n", width, c.Name, c.Desc)
 		}
-		b.WriteString("keys: mouse wheel or PgUp/PgDn scroll · Shift+drag to select text (or /mouse off for native selection) · Ctrl+C cancels a running task\n")
+		b.WriteString("keys: PgUp/PgDn scroll · select text to copy as usual (mouse capture is off by default) · /mouse on for wheel scroll · Ctrl+C cancels a running task\n")
 		m.append(b.String())
 		if m.cfg.ExtraHelp != "" {
 			m.append(m.cfg.ExtraHelp)

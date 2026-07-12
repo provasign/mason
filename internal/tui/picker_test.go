@@ -146,6 +146,15 @@ func TestAutocompleteIncludesCustomCommands(t *testing.T) {
 }
 
 // /mouse toggles mouse capture and returns the matching bubbletea command.
+func TestMouseDefaultsOffForNativeSelection(t *testing.T) {
+	// Mouse capture must start OFF so terminal text selection / copy works
+	// without the user discovering /mouse off.
+	m, _ := newTestModel(Config{ModelName: "m", Usage: func() (int, int, float64) { return 0, 0, 0 }})
+	if m.mouseOn {
+		t.Fatal("mouse capture must default OFF (native text selection)")
+	}
+}
+
 func TestMouseToggleCommand(t *testing.T) {
 	m, _ := newTestModel(Config{ModelName: "m", Usage: func() (int, int, float64) { return 0, 0, 0 }})
 	mm, cmd := m.command("/mouse off")

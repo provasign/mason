@@ -134,9 +134,40 @@ func postJSON(ctx context.Context, url string, headers map[string]string, payloa
 	}
 	if resp.StatusCode >= 300 {
 		return nil, &httpError{code: resp.StatusCode,
-			msg: fmt.Sprintf("%s: HTTP %d: %s", url, resp.StatusCode, truncate(string(out), 300))}
+			msg: providerErrorMessage(resp.StatusCode, out)}
 	}
 	return out, nil
+}
+
+// providerErrorMessage turns a failed API response into a clean, actionable
+// line instead of a truncated JSON dump. Both Anthropic and OpenAI wrap the
+// human-readable cause in {"error":{"message":...}}; we surface that, and add
+// a next step for the mistakes users actually hit (billing, auth, rate limit).
+func providerErrorMessage(status int, body []byte) string {
+	var parsed struct {
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+			Code    string `json:"code"`
+		} `json:"error"`
+	}
+	msg := strings.TrimSpace(string(body))
+	if json.Unmarshal(body, &parsed) == nil && parsed.Error.Message != "" {
+		msg = parsed.Error.Message
+	}
+	hint := ""
+	low := strings.ToLower(msg)
+	switch {
+	case status == 401 || status == 403 || strings.Contains(low, "api key") || strings.Contains(low, "authentication"):
+		hint = " — check your API key (mason login <provider>), or switch to a free local model with /model"
+	case strings.Contains(low, "credit") || strings.Contains(low, "billing") || strings.Contains(low, "quota") || strings.Contains(low, "insufficient"):
+		hint = " — this is your API account's billing (separate from a Pro/Max subscription); add credits, or run a free local model with /model"
+	case status == 429 || strings.Contains(low, "rate limit") || strings.Contains(low, "overloaded"):
+		hint = " — rate limited; retry shortly, or switch models with /model"
+	case status == 404 || strings.Contains(low, "model"):
+		hint = " — check the model name (/model lists valid choices)"
+	}
+	return msg + hint
 }
 
 func truncate(s string, n int) string {

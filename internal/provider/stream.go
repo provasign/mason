@@ -43,7 +43,7 @@ func postStream(ctx context.Context, url string, headers map[string]string, payl
 		var b bytes.Buffer
 		_, _ = b.ReadFrom(resp.Body)
 		return &httpError{code: resp.StatusCode,
-			msg: fmt.Sprintf("%s: HTTP %d: %s", url, resp.StatusCode, truncate(b.String(), 300))}
+			msg: providerErrorMessage(resp.StatusCode, b.Bytes())}
 	}
 	sc := bufio.NewScanner(resp.Body)
 	sc.Buffer(make([]byte, 0, 1<<16), 1<<22)
