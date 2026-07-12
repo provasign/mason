@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -54,17 +55,12 @@ func TestGitStatusLines(t *testing.T) {
 	if gitStatusLines(root) == nil {
 		t.Fatal("clean repo must yield an empty (non-nil) map")
 	}
-	writeTree2(t, root, "x.txt", "hi")
+	if err := os.WriteFile(filepath.Join(root, "x.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	m := gitStatusLines(root)
 	if m["x.txt"] != "??" {
 		t.Fatalf("untracked file must appear, got %v", m)
-	}
-}
-
-func writeTree2(t *testing.T, root, rel, content string) {
-	t.Helper()
-	if err := exec.Command("sh", "-c", "printf '%s' '"+content+"' > "+root+"/"+rel).Run(); err != nil {
-		t.Fatal(err)
 	}
 }
 
