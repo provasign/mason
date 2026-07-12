@@ -215,6 +215,7 @@ func topLangs(count map[string]int) string {
 
 // entryPointIn detects a program entry in one file (bounded read).
 func entryPointIn(abs, rel, lang string) string {
+	rel = filepath.ToSlash(rel) // stable rendering on Windows
 	if strings.Contains(rel, "_test.") || strings.HasPrefix(rel, "test") {
 		return ""
 	}

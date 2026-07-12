@@ -17,6 +17,7 @@ func isolateCache(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmp, "cache"))
+	t.Setenv("LocalAppData", filepath.Join(tmp, "lad")) // Windows os.UserCacheDir
 }
 
 func TestSessionSaveListLoadRoundtrip(t *testing.T) {
