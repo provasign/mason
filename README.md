@@ -147,7 +147,7 @@ mason models
 shows what is already installed, what your machine can run (filtered by
 memory), and downloads a pick on a single keypress — including installing
 the Ollama runtime itself if it's missing. If you start mason with no model
-anywhere, it offers this setup instead of an error. `/models` does the same
+anywhere, it offers this setup instead of an error. `/model` does the same
 inside the REPL. The catalog is curated to coding models with tool-calling
 support (the measured floor for driving mason); ★ entries are measured in
 the provasign study.
@@ -155,7 +155,7 @@ the provasign study.
 Model auto-detection: best installed local model first (catalog order),
 then any installed local model, then Anthropic, then OpenAI.
 
-**Nobody types model IDs.** `/models` shows ONE numbered list — installed
+**Nobody types model IDs.** `/model` shows ONE numbered list — installed
 local models, downloadable local models, a curated API shortlist (Claude
 Fable/Sonnet/Haiku/Opus, GPT-4.1/-mini), and — for any vendor you've
 already keyed — **every current model straight from that vendor's own
@@ -172,8 +172,11 @@ Manager / Linux Secret Service). Next time it just switches.
 every matching command — built-in and project-defined (`.mason/commands/`)
 — with a one-line description, narrowing as you type. ↑/↓ moves the
 highlight, Tab/Enter fills it in (a second Enter runs it — the filled
-command still needs its arguments), Esc dismisses. The line-mode REPL
-gets the same command set via Tab-completion.
+command still needs its arguments), Esc dismisses. **`/model ` continues
+into a second stage**: model suggestions (your installed local models
+first, then sonnet/haiku/opus/fable/gpt aliases, then the rest) narrow as
+you type — `/model hai` → Tab → `/model haiku` → Enter. The line-mode
+REPL gets both stages via Tab-completion.
 
 **Native text selection.** The TUI captures the mouse for wheel-scrolling,
 which normally means you need Shift+drag to select text. `/mouse off`
@@ -189,7 +192,7 @@ input box, spinner, and a live status bar (state · tokens · cost · model).
 Assistant replies render as **markdown**. Permission prompts render inline
 (y/n) **with a preview of the exact change** — the −/+ diff for an edit,
 new-file/overwrite disclosure for a write, edit counts for a rename apply.
-`/models` numbers downloadable models too: picking one hands the screen to
+`/model` numbers downloadable models too: picking one hands the screen to
 ollama's progress bars, then switches to the model automatically. Ctrl+C
 cancels the running task without killing the session, ↑/↓/PgUp/PgDn
 scroll history. `--no-tui`

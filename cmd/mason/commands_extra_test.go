@@ -1,9 +1,12 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
+
+func slicesContains(s []string, v string) bool { return slices.Contains(s, v) }
 
 func TestCustomCommandInfos(t *testing.T) {
 	root := commandsRoot(t) // defined in commands_test.go: fix-issue, standup
@@ -28,7 +31,12 @@ func TestReplCommandNamesMatchTUITable(t *testing.T) {
 	if len(names) == 0 {
 		t.Fatal("must not be empty")
 	}
-	want := map[string]bool{"models": true, "model": true, "help": true, "mouse": true, "exit": true}
+	// "models" is deliberately absent: merged into /model (kept only as a
+	// hidden legacy alias, not advertised or completed).
+	want := map[string]bool{"model": true, "help": true, "mouse": true, "exit": true}
+	if slicesContains(names, "models") {
+		t.Error("'models' must not be advertised — it merged into /model")
+	}
 	got := map[string]bool{}
 	for _, n := range names {
 		got[n] = true

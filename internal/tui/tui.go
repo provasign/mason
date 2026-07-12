@@ -63,6 +63,10 @@ type Config struct {
 	// CustomCommands are project-defined slash commands (.mason/commands)
 	// added to the autocomplete popup and /help alongside the built-ins.
 	CustomCommands []CommandInfo
+	// ModelSuggestions feeds the "/model <typing…>" argument popup: every
+	// switchable choice (aliases, installed local tags, curated API).
+	// Called once per session on first use — may probe the local runtime.
+	ModelSuggestions func() []CommandInfo
 }
 
 // APIModel is one curated paid-model choice in the picker.
@@ -88,8 +92,7 @@ type CommandInfo struct {
 // commands: it drives /help, the autocomplete popup, and (via just the
 // names) the REPL's Tab-completion — one list, so they can't drift apart.
 var BuiltinCommands = []CommandInfo{
-	{"models", "list ALL models — free local, downloadable, and API — pick with /model N"},
-	{"model", "switch model — number, or a name: sonnet, haiku, opus, fable, gpt, gpt-mini"},
+	{"model", "no args: list ALL models · then /model N, a name (suggestions appear as you type), or any spec"},
 	{"cost", "session token usage and cost"},
 	{"savings", "graph-read token ledger"},
 	{"compact", "condense old history (deterministic — no model call)"},
@@ -237,11 +240,15 @@ type uiModel struct {
 	keyIn    textinput.Model
 	mouseOn  bool // /mouse — off releases the terminal's native text selection
 	// Slash-command autocomplete: recomputed on every keystroke while the
-	// input is an in-progress "/word" with no space yet.
+	// input is an in-progress "/word" (command stage) or "/model <arg>"
+	// (argument stage).
 	suggestOpen  bool
 	suggestions  []CommandInfo
 	suggestIdx   int
-	suggestLines int // current popup height, subtracted from the viewport
+	suggestLines int  // current popup height, subtracted from the viewport
+	suggestArg   bool // argument stage: fills "/model <name>" instead of the command
+	modelSugg    []CommandInfo // cached ModelSuggestions() (probes ollama once)
+	modelSuggOK  bool
 }
 
 func newModel(u *UI, cfg Config) uiModel {
@@ -424,7 +431,7 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.ready {
 			m.vp = viewport.New(msg.Width, 3)
 			m.ready = true
-			m.append(fmt.Sprintf("welcome — model %s · /models to switch · /help for commands · Shift+drag or /mouse off to select text\n", m.model))
+			m.append(fmt.Sprintf("welcome — model %s · /model to switch · /help for commands · Shift+drag or /mouse off to select text\n", m.model))
 		}
 		m.inWidth = msg.Width - 6 // textarea chrome (prompt gutter) eats columns
 		m.in.SetWidth(msg.Width - 2)
@@ -636,13 +643,21 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // updateSuggestions recomputes the autocomplete popup from the current
-// input: open only while the line is an in-progress "/word" (no space yet,
-// so a chosen command's arguments never re-trigger it).
+// input. Two stages: an in-progress "/word" suggests COMMANDS; an
+// in-progress "/model <arg>" suggests MODELS (aliases, installed local
+// tags, curated API entries). Anything else closes the popup.
 func (m *uiModel) updateSuggestions() {
 	v := m.in.Value()
-	if !strings.HasPrefix(v, "/") || strings.ContainsAny(v, " \n\t") {
-		m.suggestOpen, m.suggestions, m.suggestLines = false, nil, 0
-		m.layout()
+	if !strings.HasPrefix(v, "/") || strings.ContainsAny(v, "\n\t") {
+		m.closeSuggestions()
+		return
+	}
+	if arg, ok := strings.CutPrefix(v, "/model "); ok && !strings.Contains(arg, " ") {
+		m.suggestModels(arg)
+		return
+	}
+	if strings.Contains(v, " ") {
+		m.closeSuggestions()
 		return
 	}
 	q := strings.ToLower(v[1:])
@@ -654,12 +669,37 @@ func (m *uiModel) updateSuggestions() {
 		}
 	}
 	sort.Slice(matches, func(i, j int) bool { return matches[i].Name < matches[j].Name })
-	if len(matches) == 0 || (len(matches) == 1 && strings.EqualFold(matches[0].Name, q)) {
-		m.suggestOpen, m.suggestions, m.suggestLines = false, nil, 0
-		m.layout()
+	if len(matches) == 1 && strings.EqualFold(matches[0].Name, q) {
+		matches = nil // exact unique match — nothing left to suggest
+	}
+	m.openSuggestions(matches, false)
+}
+
+// suggestModels runs the argument stage for "/model <partial>".
+func (m *uiModel) suggestModels(partial string) {
+	if !m.modelSuggOK && m.cfg.ModelSuggestions != nil {
+		m.modelSugg = m.cfg.ModelSuggestions()
+		m.modelSuggOK = true
+	}
+	q := strings.ToLower(strings.TrimSpace(partial))
+	var matches []CommandInfo
+	for _, c := range m.modelSugg {
+		if q == "" || strings.Contains(strings.ToLower(c.Name), q) {
+			matches = append(matches, c)
+		}
+	}
+	if len(matches) == 1 && strings.EqualFold(matches[0].Name, q) {
+		matches = nil
+	}
+	m.openSuggestions(matches, true)
+}
+
+func (m *uiModel) openSuggestions(matches []CommandInfo, argStage bool) {
+	const maxSuggest = 6
+	if len(matches) == 0 {
+		m.closeSuggestions()
 		return
 	}
-	const maxSuggest = 6
 	if len(matches) > maxSuggest {
 		matches = matches[:maxSuggest]
 	}
@@ -668,22 +708,33 @@ func (m *uiModel) updateSuggestions() {
 		m.suggestIdx = 0
 	}
 	m.suggestOpen = true
+	m.suggestArg = argStage
 	m.suggestLines = len(matches)
 	m.layout()
 }
 
-// applySuggestion fills the highlighted command into the input (with a
-// trailing space for arguments) and closes the popup; it does not submit —
-// a second Enter runs it, matching how a filled command needs its args.
+func (m *uiModel) closeSuggestions() {
+	m.suggestOpen, m.suggestions, m.suggestLines, m.suggestArg = false, nil, 0, false
+	m.layout()
+}
+
+// applySuggestion fills the highlighted entry into the input and closes the
+// popup; it does not submit. Command stage leaves a trailing space for
+// arguments; the model-argument stage fills the complete "/model <name>"
+// line ready for Enter.
 func (m *uiModel) applySuggestion() {
 	if len(m.suggestions) == 0 {
 		return
 	}
 	pick := m.suggestions[m.suggestIdx]
-	m.in.SetValue("/" + pick.Name + " ")
+	if m.suggestArg {
+		m.in.SetValue("/model " + pick.Name)
+	} else {
+		m.in.SetValue("/" + pick.Name + " ")
+	}
 	m.in.CursorEnd()
-	m.suggestOpen, m.suggestions, m.suggestLines, m.suggestIdx = false, nil, 0, 0
-	m.layout()
+	m.suggestIdx = 0
+	m.closeSuggestions()
 }
 
 // startKeyEntry switches the input box into masked API-key collection for
@@ -962,7 +1013,34 @@ func (m uiModel) command(line string) (tea.Model, tea.Cmd) {
 			events <- doneMsg{}
 		}()
 		return m, m.sp.Tick
-	case "/models":
+	case "/models": // legacy alias — /model with no args is the same picker
+		return m.modelList()
+	case "/model":
+		if len(fields) < 2 {
+			return m.modelList()
+		}
+		return m.modelSwitch(fields[1])
+	default:
+		if m.cfg.ExpandCommand != nil {
+			if task, ok := m.cfg.ExpandCommand(line); ok {
+				if m.busy {
+					m.append(errStyle.Render("a task is already running — Ctrl+C to cancel it first") + "\n")
+					return m, nil
+				}
+				m.append(statusStyle.Render("· custom command "+fields[0]) + "\n")
+				cmd := m.submit(task)
+				return m, cmd
+			}
+		}
+		m.append("unknown command — /help\n")
+		return m, nil
+	}
+}
+
+// modelList renders the unified picker (/model with no arguments) and kicks
+// off the live vendor fetches.
+func (m uiModel) modelList() (tea.Model, tea.Cmd) {
+	{
 		st := localmodels.Detect()
 		ram := localmodels.SystemRAMGB()
 		m.pickInstalled = st.Installed
@@ -1020,12 +1098,14 @@ func (m uiModel) command(line string) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
-	case "/model":
-		if len(fields) < 2 {
-			m.append("current model: " + m.model + "\n")
-			return m, nil
-		}
-		spec := fields[1]
+	}
+}
+
+// modelSwitch resolves a /model argument — pick number, friendly alias, or
+// full spec — and switches, guiding masked key entry when the vendor has no
+// stored credential.
+func (m uiModel) modelSwitch(spec string) (tea.Model, tea.Cmd) {
+	{
 		if n, err := strconv.Atoi(spec); err == nil {
 			if len(m.pickInstalled) == 0 && len(m.pickDownload) == 0 && len(m.pickAPI) == 0 {
 				st := localmodels.Detect()
@@ -1056,7 +1136,7 @@ func (m uiModel) command(line string) (tea.Model, tea.Cmd) {
 			case n > curatedEnd && n <= curatedEnd+len(m.pickRemote):
 				spec = m.pickRemote[n-1-curatedEnd].Spec
 			default:
-				m.append(errStyle.Render("no model #"+fields[1]+" — see /models") + "\n")
+				m.append(errStyle.Render("no model #"+spec+" — /model lists every choice") + "\n")
 				return m, nil
 			}
 		} else {
@@ -1078,20 +1158,6 @@ func (m uiModel) command(line string) (tea.Model, tea.Cmd) {
 		}
 		m.model = spec
 		m.append("switched to " + spec + "\n")
-		return m, nil
-	default:
-		if m.cfg.ExpandCommand != nil {
-			if task, ok := m.cfg.ExpandCommand(line); ok {
-				if m.busy {
-					m.append(errStyle.Render("a task is already running — Ctrl+C to cancel it first") + "\n")
-					return m, nil
-				}
-				m.append(statusStyle.Render("· custom command "+fields[0]) + "\n")
-				cmd := m.submit(task)
-				return m, cmd
-			}
-		}
-		m.append("unknown command — /help\n")
 		return m, nil
 	}
 }

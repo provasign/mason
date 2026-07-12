@@ -24,28 +24,67 @@ func TestAutocompletePopupOpensAndFilters(t *testing.T) {
 	if !m.suggestOpen || len(m.suggestions) == 0 {
 		t.Fatal("popup must open on bare '/'")
 	}
-	m = typeString(m, "mod")
+	m = typeString(m, "mo")
 	if !m.suggestOpen {
 		t.Fatal("popup must stay open while narrowing")
 	}
 	for _, c := range m.suggestions {
-		if !strings.HasPrefix(c.Name, "mod") {
+		if !strings.HasPrefix(c.Name, "mo") {
 			t.Fatalf("filter leaked a non-matching entry: %+v", c)
 		}
 	}
-	// "/models" is an exact, unique match — nothing left to suggest.
-	m = typeString(m, "els")
+	// "/model" is an exact, unique match — nothing left to suggest.
+	m = typeString(m, "del")
 	if m.suggestOpen {
 		t.Fatalf("an exact unique match must close the popup, suggestions=%+v", m.suggestions)
 	}
 }
 
-// A space closes the popup even mid-typing (args must not re-trigger it).
+// A space closes the popup for ordinary commands (args must not re-trigger
+// the command stage)…
 func TestAutocompletePopupClosesOnSpace(t *testing.T) {
 	m, _ := newTestModel(Config{ModelName: "m", Usage: func() (int, int, float64) { return 0, 0, 0 }})
-	m = typeString(m, "/model ")
+	m = typeString(m, "/plan ")
 	if m.suggestOpen {
-		t.Fatal("a space must close the popup")
+		t.Fatal("a space must close the command popup")
+	}
+}
+
+// …but "/model " opens the ARGUMENT stage: model suggestions, narrowing as
+// the user types, Tab filling the full switch line.
+func TestModelArgumentSuggestions(t *testing.T) {
+	calls := 0
+	m, _ := newTestModel(Config{ModelName: "m",
+		Usage: func() (int, int, float64) { return 0, 0, 0 },
+		ModelSuggestions: func() []CommandInfo {
+			calls++
+			return []CommandInfo{
+				{Name: "sonnet", Desc: "claude:claude-sonnet-5"},
+				{Name: "haiku", Desc: "claude:claude-haiku-4-5-20251001"},
+				{Name: "qwen3-coder:30b", Desc: "installed local model ($0)"},
+			}
+		}})
+	m = typeString(m, "/model ")
+	if !m.suggestOpen || !m.suggestArg || len(m.suggestions) != 3 {
+		t.Fatalf("'/model ' must open the argument popup with every choice: %+v", m.suggestions)
+	}
+	m = typeString(m, "qwen")
+	if len(m.suggestions) != 1 || m.suggestions[0].Name != "qwen3-coder:30b" {
+		t.Fatalf("typing must narrow by substring: %+v", m.suggestions)
+	}
+	mm, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = mm.(uiModel)
+	if m.in.Value() != "/model qwen3-coder:30b" {
+		t.Fatalf("Tab must fill the full switch line, got %q", m.in.Value())
+	}
+	if m.suggestOpen {
+		t.Fatal("Tab must close the popup")
+	}
+	// The (possibly runtime-probing) source is called once, then cached.
+	m = typeString(m, "")
+	m.updateSuggestions()
+	if calls != 1 {
+		t.Fatalf("ModelSuggestions must be cached, called %d times", calls)
 	}
 }
 

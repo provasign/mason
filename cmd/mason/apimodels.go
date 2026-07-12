@@ -79,6 +79,39 @@ type remotePick struct {
 
 const maxRemoteShown = 15 // live lists (esp. OpenAI's) can run long; the rest reach via a typed spec
 
+// modelSuggestions feeds the "/model <typing…>" autocomplete. Order is
+// relevance under a small popup cap: the user's INSTALLED local models
+// first (most likely switch targets, $0), then the friendly API aliases,
+// then downloadable locals, then full API specs. Probes ollama once
+// (callers cache).
+func modelSuggestions() []tui.CommandInfo {
+	var out []tui.CommandInfo
+	st := localmodels.Detect()
+	for _, tag := range st.Installed {
+		out = append(out, tui.CommandInfo{Name: tag, Desc: "installed local model ($0)"})
+	}
+	seen := map[string]bool{}
+	aliasOrder := []string{"sonnet", "haiku", "opus", "fable", "gpt", "gpt-mini"}
+	for _, a := range aliasOrder {
+		if spec, ok := modelAliases[a]; ok {
+			out = append(out, tui.CommandInfo{Name: a, Desc: spec})
+			seen[spec] = true
+		}
+	}
+	installed := st.InstalledSet()
+	for _, c := range localmodels.Catalog {
+		if !installed[c.Tag] {
+			out = append(out, tui.CommandInfo{Name: c.Tag, Desc: "local, downloads on first use — " + c.Note})
+		}
+	}
+	for _, am := range apiCatalog {
+		if !seen[am.Spec] {
+			out = append(out, tui.CommandInfo{Name: am.Spec, Desc: am.Label})
+		}
+	}
+	return out
+}
+
 // renderModelList builds the unified picker text for the line-mode REPL and
 // returns the pick tables that map numbers back to choices.
 func renderModelList() (text string, installed []string, download []localmodels.Model, remote []remotePick) {

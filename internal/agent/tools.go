@@ -120,6 +120,13 @@ const maxToolOutput = 24_000 // chars of tool output delivered to the model
 // passes tests — a green one releases the rename wall.
 var buildVerifyRe = regexp.MustCompile(`\b(go (build|vet|test)|cargo (build|check|test)|mvn|gradle|make|npm (run )?(build|test)|yarn (build|test)|pytest|tsc)\b`)
 
+// selfRevertRe recognizes tree-wide revert commands. An agent nuking ALL of
+// its own in-flight work is almost never intended (measured: a confused 30B
+// ran `git checkout -- .` after completing a rename correctly, then burned
+// its budget redoing the task) — and intentional rollback is what the
+// user's /undo is for. Single-file reverts stay allowed.
+var selfRevertRe = regexp.MustCompile(`\bgit\s+(checkout\s+(--\s+)?\.(\s|$)|reset\s+--hard|restore\s+\.(\s|$)|clean\s+-[a-z]*f|stash\b)`)
+
 // bashTimeout bounds a single bash tool call so one hung command cannot hang
 // the whole session. MASON_BASH_TIMEOUT (seconds) overrides.
 func bashTimeout() time.Duration {
@@ -473,6 +480,12 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 		command, _ := call.Args["command"].(string)
 		if s.plan && !planSafeBash(command) {
 			return "", errPlan("command " + truncate(command, 60))
+		}
+		if s.mutated && selfRevertRe.MatchString(command) {
+			fmt.Fprintf(s.out, "  %s\n", s.st.yellow("⛔ refused tree-wide revert: "+truncate(command, 60)))
+			return "", fmt.Errorf("refused: %q would revert ALL changes made this task, including completed work. "+
+				"Revert a single file with `git checkout -- <file>` if needed. Full rollback is the "+
+				"user's call (/undo). Continue from the tree AS IT IS", command)
 		}
 		v := VerdictAsk
 		if s.opts.Policy != nil {

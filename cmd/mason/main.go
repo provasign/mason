@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -33,6 +34,33 @@ import (
 )
 
 var version = "dev" // set by -ldflags at release
+
+// init resolves a useful version for plain `go build` binaries: the VCS
+// revision from Go's build info, marked dirty when the tree was. A bare
+// "dev" once overwrote a release binary invisibly — never again.
+func init() {
+	if version != "dev" {
+		return
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		rev, dirty := "", ""
+		for _, s := range bi.Settings {
+			switch s.Key {
+			case "vcs.revision":
+				if len(s.Value) >= 12 {
+					rev = s.Value[:12]
+				}
+			case "vcs.modified":
+				if s.Value == "true" {
+					dirty = "-dirty"
+				}
+			}
+		}
+		if rev != "" {
+			version = "dev-" + rev + dirty
+		}
+	}
+}
 
 const usage = `mason — coding agent with the code graph baked in
 
@@ -63,7 +91,7 @@ flags:
   --no-tui         plain line-based REPL instead of the full-screen UI
   --max-turns <n>  per-task turn budget (default: 60 local, 30 API; 0 = unlimited)
 
-REPL commands: /models  /model <spec>  /plan  /sessions  /resume N  /cost  /savings
+REPL commands: /model [name]  /plan  /sessions  /resume N  /cost  /savings
                /compact  /clear  /help  /exit  (Tab-completes; the full-screen TUI adds
                a live autocomplete popup and /mouse to toggle native text selection)
 
@@ -652,6 +680,7 @@ func run(args []string) int {
 				url, _ := creds.OpenKeyPage(vendor)
 				return url
 			},
+			ModelSuggestions: modelSuggestions,
 			FetchRemoteModels: func(vendor string) ([]tui.RemoteModel, error) {
 				models, err := fetchRemoteModels(vendor)
 				if err != nil {
@@ -685,9 +714,24 @@ func run(args []string) int {
 	fmt.Println(`type a task — /help for commands, /exit to quit`)
 	rl := liner.NewLiner()
 	rl.SetCtrlCAborts(true)
+	var modelSuggCache []tui.CommandInfo
 	rl.SetCompleter(func(line string) []string {
 		if !strings.HasPrefix(line, "/") {
 			return nil
+		}
+		// Argument stage: "/model <partial>" completes model choices.
+		if arg, ok := strings.CutPrefix(line, "/model "); ok {
+			if modelSuggCache == nil {
+				modelSuggCache = modelSuggestions()
+			}
+			q := strings.ToLower(strings.TrimSpace(arg))
+			var out []string
+			for _, c := range modelSuggCache {
+				if q == "" || strings.Contains(strings.ToLower(c.Name), q) {
+					out = append(out, "/model "+c.Name)
+				}
+			}
+			return out
 		}
 		q := strings.ToLower(line[1:])
 		var out []string
@@ -794,17 +838,14 @@ func run(args []string) int {
 				fmt.Printf("compacted %d → %d chars\n", before, after)
 			}
 			continue
-		case line == "/models":
+		case line == "/models" || line == "/model": // /models = legacy alias
 			var text string
 			text, pickInstalled, pickDownload, pickRemote = renderModelList()
-			fmt.Println("\n" + text)
+			fmt.Printf("\ncurrent model: %s\n%s\n", model, text)
 			continue
 		case strings.HasPrefix(line, "/model"):
-			spec := strings.TrimSpace(strings.TrimPrefix(line, "/model"))
-			if spec == "" {
-				fmt.Println("current model:", model, "— /models lists every choice")
-				continue
-			}
+			spec := strings.TrimSpace(strings.TrimPrefix(line, "/models"))
+			spec = strings.TrimSpace(strings.TrimPrefix(spec, "/model"))
 			if n, err := strconv.Atoi(spec); err == nil {
 				if pickInstalled == nil && pickDownload == nil {
 					_, pickInstalled, pickDownload, pickRemote = renderModelList()
@@ -829,7 +870,7 @@ func run(args []string) int {
 				case n > curatedEnd && n <= curatedEnd+len(pickRemote):
 					spec = pickRemote[n-1-curatedEnd].Spec
 				default:
-					fmt.Println("no model #" + spec + " — see /models")
+					fmt.Println("no model #" + spec + " — /model lists every choice")
 					continue
 				}
 			} else {
