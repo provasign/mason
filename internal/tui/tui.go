@@ -35,6 +35,7 @@ type Config struct {
 	SetRedact   func(on bool)
 	SetVerbose  func(on bool) // full tool renders vs compact head + "+N more"
 	Undo        func() (string, error)
+	Review      func(base string) (warns int, text string, err error)
 	Clear       func()
 	SaveSession func()
 }
@@ -475,6 +476,7 @@ commands:
   /cost          session token usage and cost
   /savings       graph-read token ledger
   /compact       summarize old history
+  /review [base] engine-verified diff review (blast radius, coverage, stubs)
   /undo          revert the file changes of the last task (checkpointed per task)
   /auto [off]    blanket-approve bash/edit/write (or 'a' at any prompt)
   /verbose [off] full tool results (default: collapsed to a head + '+N more')
@@ -509,6 +511,39 @@ keys: mouse wheel or PgUp/PgDn scroll (Shift+drag to select text) · Ctrl+C canc
 			m.append("auto-approve ON — bash/edit/write run without asking (this session; /auto off to revert)\n")
 		}
 		return m, nil
+	case "/review":
+		if m.busy {
+			m.append(errStyle.Render("a task is running — Ctrl+C first") + "\n")
+			return m, nil
+		}
+		if m.cfg.Review == nil {
+			m.append(errStyle.Render("review unavailable (engine off)") + "\n")
+			return m, nil
+		}
+		base := ""
+		if len(fields) > 1 {
+			base = fields[1]
+		}
+		m.append("running engine review…\n")
+		ctxR, cancel := context.WithCancel(context.Background())
+		_ = ctxR
+		m.cancel = cancel
+		m.busy = true
+		events := m.ui.events
+		review := m.cfg.Review
+		go func() {
+			_, text, err := review(base)
+			out := text
+			if err != nil {
+				out = "review: " + err.Error() + "\n"
+			}
+			select {
+			case events <- chunkMsg(out):
+			default:
+			}
+			events <- doneMsg{}
+		}()
+		return m, m.sp.Tick
 	case "/undo":
 		if m.busy {
 			m.append(errStyle.Render("a task is running — Ctrl+C first") + "\n")

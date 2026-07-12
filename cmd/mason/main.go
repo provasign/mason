@@ -23,6 +23,7 @@ import (
 	"github.com/provasign/mason/internal/agent"
 	"github.com/provasign/mason/internal/creds"
 	"github.com/provasign/mason/internal/localmodels"
+	"github.com/provasign/mason/internal/mcpclient"
 	"github.com/provasign/mason/internal/provider"
 	"github.com/provasign/mason/internal/tui"
 	"github.com/provasign/prism/pkg/kit"
@@ -34,13 +35,16 @@ const usage = `mason — coding agent with the code graph baked in
 
 usage:
   mason [flags] ["task"]        one-shot task, or interactive REPL if omitted
+  mason review [--base <ref>] [--strict]   engine-verified diff review (no model; --strict fails CI on warnings)
   mason models                  browse, download, and pick free local models
   mason login <anthropic|openai>    store an API key in the OS keychain
   mason logout <anthropic|openai>   remove a stored API key
   mason version
 
 flags:
-  --model <spec>   ollama:<tag> | claude:<m> | openai:<m>  (default: auto-detect)
+  --model <spec>   ollama:<tag> | claude:<m> | openai:<m> | openrouter:<m> |
+                   lmstudio:<m> | vllm:<m> | oai:<url>#<m> | auto  (default: auto-detect)
+                   auto = measured tier routing: graph tasks → small local, coding → best local
   --dir <path>     project root (default: current directory)
   --continue       resume the previous conversation for this directory
   --yes            skip permission prompts for bash/edit/write
@@ -73,8 +77,15 @@ func run(args []string) int {
 		switch args[0] {
 		case "login":
 			if len(args) < 2 {
-				fmt.Fprintln(os.Stderr, "usage: mason login <anthropic|openai>")
+				fmt.Fprintln(os.Stderr, "usage: mason login <anthropic|openai|openrouter|chatgpt>")
 				return 2
+			}
+			if args[1] == "chatgpt" {
+				if err := creds.LoginChatGPT(); err != nil {
+					fmt.Fprintln(os.Stderr, "login:", err)
+					return 1
+				}
+				return 0
 			}
 			if err := creds.Login(args[1]); err != nil {
 				fmt.Fprintln(os.Stderr, "login:", err)
@@ -92,6 +103,20 @@ func run(args []string) int {
 			}
 			fmt.Println("removed", args[1], "credential from the OS keychain")
 			return 0
+		case "review":
+			base, strict := "", false
+			for i := 1; i < len(args); i++ {
+				switch args[i] {
+				case "--base":
+					if i+1 < len(args) {
+						base = args[i+1]
+						i++
+					}
+				case "--strict":
+					strict = true
+				}
+			}
+			return runReview(base, strict)
 		case "models":
 			interactive := term.IsTerminal(int(os.Stdin.Fd()))
 			spec, err := localmodels.Wizard(interactive)
@@ -159,7 +184,42 @@ func run(args []string) int {
 			return 1
 		}
 	}
+	var routerFn func(string, bool) provider.Provider
+	if model == "auto" {
+		small, big := pickAutoModels()
+		if big == "" {
+			fmt.Fprintln(os.Stderr, "mason: --model auto needs at least one installed local model (mason models)")
+			return 1
+		}
+		if small == "" {
+			small = big
+		}
+		smallP, err := provider.NewProvider(small, nil)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "mason:", err)
+			return 1
+		}
+		bigP, err := provider.NewProvider(big, nil)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "mason:", err)
+			return 1
+		}
+		routerFn = func(task string, graphShaped bool) provider.Provider {
+			if graphShaped {
+				return smallP
+			}
+			return bigP
+		}
+		model = big // display/cost baseline
+		fmt.Fprintf(os.Stderr, "auto routing: graph tasks → %s · coding → %s\n", small, big)
+	}
 	p, err := provider.NewProvider(model, func(vendor string) (string, error) {
+		if vendor == "chatgpt-oauth" {
+			if tok := creds.GetOAuthAccessToken("chatgpt"); tok != "" {
+				return tok, nil
+			}
+			return "", fmt.Errorf("no ChatGPT sign-in found")
+		}
 		return creds.Get(vendor, interactive)
 	})
 	if err != nil {
@@ -269,6 +329,18 @@ func run(args []string) int {
 		}
 	}
 	opts.Policy = agent.LoadPolicy(root)
+	opts.Router = routerFn
+	// MCP servers from .mason/config.json → tools the model can call,
+	// gated and redacted like everything else.
+	mcpClients := connectMCP(root)
+	defer func() {
+		for _, c := range mcpClients {
+			c.Close()
+		}
+	}()
+	extraTools, extraInvoke := mcpToolset(mcpClients)
+	opts.ExtraTools = extraTools
+	opts.ExtraInvoke = extraInvoke
 	sess := agent.New(p, invoke, opts)
 	sessFile := sessionPath(root)
 	if cont {
@@ -340,6 +412,15 @@ func run(args []string) int {
 			Clear:       sess.Clear,
 			SetRedact:   sess.SetRedact,
 			Undo: sess.Undo,
+			Review: func(base string) (int, string, error) {
+				rep, err := sess.Review(base)
+				if err != nil {
+					return 0, "", err
+				}
+				var b strings.Builder
+				warns := rep.Render(func(l string) { b.WriteString(l + "\n") })
+				return warns, b.String(), nil
+			},
 			SetVerbose: func(on bool) {
 				if on {
 					sess.SetCompactRender(0)
@@ -462,6 +543,123 @@ func run(args []string) int {
 	}
 	printCost(sess, model)
 	printSavings(k)
+	return 0
+}
+
+// connectMCP starts the servers configured under "mcp" in .mason/config.json.
+func connectMCP(root string) map[string]*mcpclient.Client {
+	b, err := os.ReadFile(filepath.Join(root, ".mason", "config.json"))
+	if err != nil {
+		return nil
+	}
+	var cfg struct {
+		MCP map[string]mcpclient.ServerConfig `json:"mcp"`
+	}
+	if json.Unmarshal(b, &cfg) != nil || len(cfg.MCP) == 0 {
+		return nil
+	}
+	out := map[string]*mcpclient.Client{}
+	for name, sc := range cfg.MCP {
+		c, err := mcpclient.Connect(name, sc)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "⚠ mcp %s: %v (skipped)\n", name, err)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "mcp %s: %d tool(s)\n", name, len(c.Tools()))
+		out[name] = c
+	}
+	return out
+}
+
+// mcpToolset exposes each server tool as mcp_<server>_<tool>.
+func mcpToolset(clients map[string]*mcpclient.Client) ([]provider.ToolDef, func(string, map[string]any) (string, error)) {
+	if len(clients) == 0 {
+		return nil, nil
+	}
+	var defs []provider.ToolDef
+	route := map[string]func(map[string]any) (string, error){}
+	for name, c := range clients {
+		for _, t := range c.Tools() {
+			full := "mcp_" + name + "_" + t.Name
+			schema := t.InputSchema
+			if schema == nil {
+				schema = map[string]any{"type": "object", "properties": map[string]any{}}
+			}
+			defs = append(defs, provider.ToolDef{
+				Name: full, Description: "[" + name + " MCP] " + t.Description, Parameters: schema,
+			})
+			tool := t.Name
+			cl := c
+			route[full] = func(args map[string]any) (string, error) { return cl.Call(tool, args) }
+		}
+	}
+	invoke := func(name string, args map[string]any) (string, error) {
+		fn, ok := route[name]
+		if !ok {
+			return "", fmt.Errorf("unknown mcp tool %q", name)
+		}
+		return fn(args)
+	}
+	return defs, invoke
+}
+
+// pickAutoModels chooses the routing pair from installed catalog models:
+// small = first installed 14B-class-or-below (graph route-and-summarize is
+// tier-invariant down to 14B, measured); big = best installed overall.
+func pickAutoModels() (small, big string) {
+	st := localmodels.Detect()
+	if !st.ServerUp {
+		return "", ""
+	}
+	installed := st.InstalledSet()
+	for _, m := range localmodels.Catalog {
+		if installed[m.Tag] {
+			if big == "" {
+				big = "ollama:" + m.Tag
+			}
+			if small == "" && m.MinRAMGB <= 16 {
+				small = "ollama:" + m.Tag
+			}
+		}
+	}
+	return small, big
+}
+
+// runReview is the headless engine review — no model, deterministic, CI-safe.
+func runReview(base string, strict bool) int {
+	root, err := filepath.Abs(".")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "review:", err)
+		return 1
+	}
+	k, err := kit.Open(root)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "review: code graph unavailable:", err)
+		return 1
+	}
+	defer k.Close()
+	sess := agent.New(nil, k.Invoke, agent.Options{Root: root,
+		FileSymbols: func(path string) []agent.SymbolInfo {
+			syms, err := k.FileSymbols(context.Background(), path)
+			if err != nil {
+				return nil
+			}
+			out := make([]agent.SymbolInfo, 0, len(syms))
+			for _, s := range syms {
+				out = append(out, agent.SymbolInfo{Name: s.Name, QualifiedName: s.QualifiedName, Kind: s.Kind, Line: s.Line})
+			}
+			return out
+		}})
+	rep, err := sess.Review(base)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "review:", err)
+		return 1
+	}
+	warns := rep.Render(func(l string) { fmt.Println(l) })
+	if strict && warns > 0 {
+		fmt.Fprintf(os.Stderr, "review: %d warning(s) — failing (--strict)\n", warns)
+		return 1
+	}
 	return 0
 }
 

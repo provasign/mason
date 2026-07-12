@@ -90,6 +90,12 @@ type Options struct {
 	NoRedact     bool                           // disable secret redaction (default ON)
 	CompactRender int                           // cap items per rendered group (0 = show all)
 	Policy       *Policy                        // standing permissions (.mason/config.json)
+	// Router picks a provider per task (model:auto). nil = fixed provider.
+	Router func(task string, graphShaped bool) provider.Provider
+	// ExtraTools are externally provided (MCP) tools; ExtraInvoke runs one.
+	// Results pass through redaction like everything else.
+	ExtraTools  []provider.ToolDef
+	ExtraInvoke func(name string, args map[string]any) (string, error)
 }
 
 // SetCompactRender adjusts the per-group render cap mid-session (/verbose).
@@ -133,8 +139,8 @@ func New(p provider.Provider, invoke Invoker, opts Options) *Session {
 	if opts.MaxTurns == 0 {
 		// Local models are free — the cap is a runaway guard, not a cost
 		// control, so it is generous there. --max-turns 0 becomes unlimited
-		// via -1 from the CLI.
-		if strings.HasPrefix(p.Name(), "ollama:") {
+		// via -1 from the CLI. p may be nil for engine-only sessions (review).
+		if p != nil && strings.HasPrefix(p.Name(), "ollama:") {
 			opts.MaxTurns = 60
 		} else {
 			opts.MaxTurns = 30
@@ -343,8 +349,19 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 	if s.invoke == nil {
 		tools = codingToolsOnly(tools) // engine unavailable — degrade gracefully
 	}
+	tools = append(tools, s.opts.ExtraTools...)
 	graphOnly := graphToolsOnly(tools)
 	wall := s.invoke != nil && graphIntent.MatchString(task)
+
+	// model:auto — route this task to the measured-cheapest capable tier:
+	// graph-shaped work needs route-and-summarize only (14B-class is at the
+	// engine ceiling); general coding gets the strongest local model.
+	if s.opts.Router != nil {
+		if p := s.opts.Router(task, wall); p != nil && p != s.provider {
+			s.provider = p
+			fmt.Fprintf(s.out, "  %s\n", s.st.dim("auto-routed to "+p.Name()))
+		}
+	}
 	s.mutated = false
 	nudged := false
 	refusalNudged := false
@@ -620,6 +637,21 @@ func (s *Session) dispatch(ctx context.Context, call provider.ToolCall, tr *trai
 
 	if call.Name == "subagent" {
 		return s.runSubagent(ctx, call, tr)
+	}
+
+	// External (MCP) tools: gated like bash — the server is outside the
+	// harness's trust boundary.
+	if s.opts.ExtraInvoke != nil && strings.HasPrefix(call.Name, "mcp_") {
+		s.setStatus("mcp: %s", call.Name)
+		fmt.Fprintf(s.out, "  %s\n", s.st.cyan("⇄ "+call.Name+" "+compactArgs(call.Args)))
+		if ok, why := s.gate(VerdictAsk, "mcp call: "+call.Name, compactArgs(call.Args)); !ok {
+			return "", fmt.Errorf("%s: mcp call", why)
+		}
+		out, err := s.opts.ExtraInvoke(call.Name, call.Args)
+		if err != nil {
+			return "", err
+		}
+		return truncate(out, maxToolOutput), nil
 	}
 
 	if call.Name != "bash" && call.Name != "edit_file" && call.Name != "write_file" {

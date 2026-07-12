@@ -182,6 +182,20 @@ func NewProvider(spec string, getKey func(vendor string) (string, error)) (Provi
 		return &openaiProvider{model: model, url: stripV1(envOr("LMSTUDIO_URL", "http://localhost:1234"))}, nil
 	case "vllm":
 		return &openaiProvider{model: model, url: stripV1(envOr("VLLM_URL", "http://localhost:8000"))}, nil
+	case "chatgpt":
+		// EXPERIMENTAL: Sign in with ChatGPT (Codex OAuth). The token flow
+		// and storage are implemented (mason login chatgpt); the serving
+		// endpoint is enabled only after live validation — set
+		// MASON_CHATGPT_BASE to an OpenAI-compatible base URL to test.
+		base := os.Getenv("MASON_CHATGPT_BASE")
+		if base == "" {
+			return nil, fmt.Errorf("chatgpt: provider is experimental — run `mason login chatgpt`, then set MASON_CHATGPT_BASE for first live validation")
+		}
+		key, err := getKey("chatgpt-oauth")
+		if err != nil {
+			return nil, fmt.Errorf("chatgpt:%s: %w (run `mason login chatgpt`)", model, err)
+		}
+		return &openaiProvider{model: model, key: key, url: stripV1(base)}, nil
 	case "oai", "compat":
 		base, m, ok := strings.Cut(model, "#")
 		if !ok || base == "" || m == "" {
