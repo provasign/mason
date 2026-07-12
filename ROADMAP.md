@@ -34,8 +34,9 @@ compile oracles, quality gates).
 13. ✅ Image input for vision-capable models (v0.19: --image + automatic mention-attach)
 
 ## P2 — polish and scale
-Custom slash commands + hooks · parallel sessions · themes · first-class
-Windows QA · multi-repo workspaces
+✅ Custom slash commands (v0.21: .mason/commands/*.md, $ARGUMENTS) ·
+✅ hooks (v0.21: pre_bash guards, post_edit/post_write formatters, post_task) ·
+parallel sessions · themes · first-class Windows QA · multi-repo workspaces
 
 ## Moat-deepening (engine-backed — where we pull away)
 - **/review**: engine-verified branch review — change_impact on every changed

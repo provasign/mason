@@ -107,6 +107,28 @@ all three provider wire formats (Ollama / Anthropic / OpenAI-compatible).
 `--image <path>` attaches explicitly (repeatable). Needs a vision-capable
 model; png/jpg/gif/webp, 8 MB bound.
 
+**Custom slash commands**: every `.mason/commands/<name>.md` becomes
+`/<name>` in the REPL and TUI — the file body is the prompt,
+`$ARGUMENTS` is replaced with whatever follows the command. Edits apply
+instantly (loaded fresh per use); `/help` lists them.
+
+**Hooks** — deterministic shell commands the *harness* runs around tool
+calls, configured under `"hooks"` in `.mason/config.json`:
+
+```json
+{"hooks": {
+  "pre_bash":   [{"match": "git push*", "run": "./ci/guard.sh", "block_on_fail": true}],
+  "post_edit":  [{"match": "*.go", "run": "gofmt -w \"$MASON_FILE\""}],
+  "post_task":  [{"run": "afplay /System/Library/Sounds/Glass.aiff"}]
+}}
+```
+
+A `block_on_fail` pre_bash guard refuses the command and feeds its output
+to the model — it cannot be talked out of it. post_edit/post_write run
+formatters after each write (failures become warnings in the tool result);
+post_task fires when a task ends. Env: `MASON_ROOT`, `MASON_FILE`,
+`MASON_COMMAND`.
+
 **LSP diagnostics at edit time**: mason auto-detects the project's language
 server (gopls, typescript-language-server, pyright/pylsp, rust-analyzer —
 whichever is installed), starts it lazily on the first edit, and pipes its

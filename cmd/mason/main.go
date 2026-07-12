@@ -400,6 +400,7 @@ func run(args []string) int {
 		}
 	}
 	opts.Policy = agent.LoadPolicy(root)
+	opts.Hooks = agent.LoadHooks(root)
 	opts.Router = routerFn
 	// LSP diagnostics feed: lazily start the detected language server on
 	// the FIRST edit (read-only sessions never pay the boot cost) and pipe
@@ -636,7 +637,9 @@ func run(args []string) int {
 				}
 				return fmt.Sprintf("resumed %q — %d messages", metas[n-1].Label, len(sf.Messages)), nil
 			},
-			SaveSession: func() { saveSession(sessFile, sess.History(), model, sessName) },
+			SaveSession:   func() { saveSession(sessFile, sess.History(), model, sessName) },
+			ExpandCommand: func(line string) (string, bool) { return expandCommand(root, line) },
+			ExtraHelp:     commandsHelp(root),
 		})
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "mason:", err)
@@ -686,6 +689,9 @@ func run(args []string) int {
 			return 0
 		case line == "/help":
 			fmt.Println(usage)
+			if ch := commandsHelp(root); ch != "" {
+				fmt.Print("\n" + ch)
+			}
 			continue
 		case line == "/savings":
 			printSavings(k)
@@ -780,6 +786,11 @@ func run(args []string) int {
 			fmt.Println("switched to", np.Name())
 			continue
 		case strings.HasPrefix(line, "/"):
+			if task, ok := expandCommand(root, line); ok {
+				fmt.Println("· running custom command")
+				line = task
+				break
+			}
 			fmt.Println("unknown command — /help for the list")
 			continue
 		}

@@ -42,6 +42,10 @@ type Config struct {
 	Review      func(base string) (warns int, text string, err error)
 	Clear       func()
 	SaveSession func()
+	// ExpandCommand resolves a custom slash command line to a task
+	// (.mason/commands/<name>.md); ok=false when no such command exists.
+	ExpandCommand func(line string) (task string, ok bool)
+	ExtraHelp     string // appended to /help (e.g. the custom-command list)
 }
 
 // UI owns the event channel shared with the agent goroutine.
@@ -497,6 +501,9 @@ commands:
   /exit          quit (Ctrl+C when idle also quits)
 keys: mouse wheel or PgUp/PgDn scroll (Shift+drag to select text) · Ctrl+C cancels a running task
 `)
+		if m.cfg.ExtraHelp != "" {
+			m.append(m.cfg.ExtraHelp)
+		}
 		return m, nil
 	case "/cost":
 		in, out, cost := m.cfg.Usage()
@@ -743,6 +750,17 @@ keys: mouse wheel or PgUp/PgDn scroll (Shift+drag to select text) · Ctrl+C canc
 		m.append("switched to " + spec + "\n")
 		return m, nil
 	default:
+		if m.cfg.ExpandCommand != nil {
+			if task, ok := m.cfg.ExpandCommand(line); ok {
+				if m.busy {
+					m.append(errStyle.Render("a task is already running — Ctrl+C to cancel it first") + "\n")
+					return m, nil
+				}
+				m.append(statusStyle.Render("· custom command "+fields[0]) + "\n")
+				cmd := m.submit(task)
+				return m, cmd
+			}
+		}
 		m.append("unknown command — /help\n")
 		return m, nil
 	}

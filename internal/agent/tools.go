@@ -416,7 +416,8 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 		}
 		s.mutated = true
 		fmt.Fprintf(s.out, "  ✎ %s\n%s\n", path, s.colorDiff(diffSnippet(oldText, newText)))
-		return "edit applied" + s.lspFeedback(abs, path), nil
+		warns, _ := s.runHooks(ctx, "post_edit", path, map[string]string{"MASON_FILE": abs})
+		return "edit applied" + s.lspFeedback(abs, path) + hookResultSuffix(warns), nil
 
 	case "write_file":
 		path, _ := call.Args["path"].(string)
@@ -460,7 +461,8 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 			hb.WriteString("+ " + l + "\n")
 		}
 		fmt.Fprintf(s.out, "  ✎ %s (%d bytes)\n%s", path, len(content), s.colorDiff(strings.TrimRight(hb.String(), "\n"))+"\n")
-		return "file written" + s.lspFeedback(abs, path), nil
+		warns, _ := s.runHooks(ctx, "post_write", path, map[string]string{"MASON_FILE": abs})
+		return "file written" + s.lspFeedback(abs, path) + hookResultSuffix(warns), nil
 
 	case "bash":
 		command, _ := call.Args["command"].(string)
@@ -473,6 +475,12 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 		}
 		if ok, why := s.gate(v, "run: "+command, ""); !ok {
 			return "", fmt.Errorf("%s: command", why)
+		}
+		// pre_bash hooks run AFTER the user permits and BEFORE execution —
+		// a block_on_fail guard the model cannot argue with.
+		preWarns, blocked := s.runHooks(ctx, "pre_bash", command, map[string]string{"MASON_COMMAND": command})
+		if blocked != nil {
+			return "", blocked
 		}
 		s.setStatus("running: %s", truncate(command, 50))
 		fmt.Fprintf(s.out, "  $ %s\n", command)
@@ -495,12 +503,12 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 			return res + "\n(command TIMED OUT after " + bashTimeout().String() + ")", nil
 		}
 		if err != nil {
-			return res + "\n(exit error: " + err.Error() + ")", nil
+			return res + "\n(exit error: " + err.Error() + ")" + hookResultSuffix(preWarns), nil
 		}
 		if strings.TrimSpace(res) == "" {
-			return "(no output, exit 0)", nil
+			return "(no output, exit 0)" + hookResultSuffix(preWarns), nil
 		}
-		return res, nil
+		return res + hookResultSuffix(preWarns), nil
 	}
 	return "", fmt.Errorf("unknown tool %q", call.Name)
 }

@@ -99,6 +99,7 @@ type Options struct {
 	// agent just wrote (absolute path). Fed into the tool result so the
 	// model sees breakage at edit time. nil = disabled.
 	Diagnostics func(absPath string) []string
+	Hooks       HookSet // deterministic shell hooks around tool calls (.mason/config.json)
 	// Router picks a provider per task (model:auto). nil = fixed provider.
 	Router func(task string, graphShaped bool) provider.Provider
 	// ExtraTools are externally provided (MCP) tools; ExtraInvoke runs one.
@@ -417,6 +418,8 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 	s.msgs = append(s.msgs, provider.Msg{Role: "user", Content: task, Images: imgs})
 	tr := trail.New(s.root, task)
 	defer tr.Done()
+	// post_task hooks fire however the task ends (notifications, cleanup).
+	defer func() { _, _ = s.runHooks(context.Background(), "post_task", task, nil) }()
 
 	tools := toolDefs()
 	if s.invoke == nil {
