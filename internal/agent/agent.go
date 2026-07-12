@@ -130,6 +130,8 @@ type Session struct {
 	lastRenamePlan map[string]any
 	checkpoints    []string // snapshot commits, newest last (/undo)
 	pendingNote    string   // folded into the next task message (e.g. undo notice)
+	pendingImages     []provider.Image // queued by --image for the next task
+	pendingImageNames []string
 	plan           bool  // read-only (plan) mode: mutating tools are refused
 	mutated        bool  // any mutating tool ran during the current Ask
 	usageIn        int   // session-total input tokens
@@ -353,7 +355,16 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 	if s.plan {
 		task = planNote + "\n\n" + task
 	}
-	s.msgs = append(s.msgs, provider.Msg{Role: "user", Content: task})
+	// Attach images the task names (plus any queued via --image) to the
+	// task message itself — vision models need them alongside the words.
+	imgs, imgNames := s.imagesMentioned(task)
+	imgs = append(s.pendingImages, imgs...)
+	imgNames = append(s.pendingImageNames, imgNames...)
+	s.pendingImages, s.pendingImageNames = nil, nil
+	for _, n := range imgNames {
+		fmt.Fprintf(s.out, "  %s\n", s.st.dim("· attached image "+n))
+	}
+	s.msgs = append(s.msgs, provider.Msg{Role: "user", Content: task, Images: imgs})
 	tr := trail.New(s.root, task)
 	defer tr.Done()
 
@@ -888,15 +899,22 @@ func isSourceFile(f string) bool {
 	return false
 }
 
-// filesMentioned resolves file names the task refers to — exact paths
-// first, then basename search anywhere in the repo (bounded) so "what does
-// main.py do" finds src/main.py. Returns repo-relative paths, max 3.
+// filesMentioned resolves SOURCE file names the task refers to (images are
+// routed to imagesMentioned — binary must never be text-attached).
 func (s *Session) filesMentioned(task string) []string {
+	return s.pathsMentioned(task, func(p string) bool { return !isImagePath(p) }, 3)
+}
+
+// pathsMentioned resolves file names the task refers to — exact paths
+// first, then basename search anywhere in the repo (bounded) so "what does
+// main.py do" finds src/main.py. match filters candidates (by path);
+// returns repo-relative paths, at most max.
+func (s *Session) pathsMentioned(task string, match func(string) bool, max int) []string {
 	var out []string
 	var names []string
 	for _, w := range strings.Fields(task) {
 		w = strings.Trim(w, `"'.,;:()?!`+"`")
-		if !strings.Contains(w, ".") || strings.Contains(w, "..") {
+		if !strings.Contains(w, ".") || strings.Contains(w, "..") || !match(w) {
 			continue
 		}
 		if abs, err := s.inRoot(w); err == nil {
@@ -939,8 +957,8 @@ func (s *Session) filesMentioned(task string) []string {
 			return nil
 		})
 	}
-	if len(out) > 3 {
-		out = out[:3]
+	if len(out) > max {
+		out = out[:max]
 	}
 	return out
 }

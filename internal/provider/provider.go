@@ -16,6 +16,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,6 +28,13 @@ type Msg struct {
 	CallID  string     // for Role=="tool": which call this result answers
 	Name    string     // for Role=="tool": the tool name
 	Usage   *Usage     // token usage of the API call that produced this reply
+	Images  []Image    // attached images (Role=="user", vision-capable models)
+}
+
+// Image is one attached image, already base64-encoded.
+type Image struct {
+	MediaType string `json:"mediaType"` // e.g. "image/png"
+	DataB64   string `json:"dataB64"`
 }
 
 // Usage is one API call's token accounting as the provider reported it.
@@ -257,6 +265,10 @@ func envOr(k, def string) string {
 type ollamaProvider struct {
 	model string
 	url   string
+	// noTools latches when the model rejects tool definitions ("does not
+	// support tools" — most vision models). Later turns run tool-less:
+	// a Q&A/vision answer beats a hard error.
+	noTools atomic.Bool
 }
 
 func (p *ollamaProvider) Name() string { return "ollama:" + p.model }
@@ -265,6 +277,13 @@ func (p *ollamaProvider) payload(msgs []Msg, tools []ToolDef, forceTools bool) m
 	messages := make([]map[string]any, 0, len(msgs))
 	for _, m := range msgs {
 		mm := map[string]any{"role": m.Role, "content": m.Content}
+		if len(m.Images) > 0 {
+			var imgs []string
+			for _, im := range m.Images {
+				imgs = append(imgs, im.DataB64) // ollama takes bare base64
+			}
+			mm["images"] = imgs
+		}
 		if len(m.Calls) > 0 {
 			var calls []map[string]any
 			for _, c := range m.Calls {
@@ -286,17 +305,27 @@ func (p *ollamaProvider) payload(msgs []Msg, tools []ToolDef, forceTools bool) m
 		})
 	}
 	payload := map[string]any{
-		"model": p.model, "messages": messages, "tools": tdefs, "stream": false,
+		"model": p.model, "messages": messages, "stream": false,
 		// keep_alive holds the model in memory between REPL turns; the
 		// append-only history then hits Ollama's prefix KV cache instead of
 		// re-ingesting the whole conversation.
 		"keep_alive": "30m",
 		"options":    map[string]any{"temperature": 0, "num_ctx": numCtx()},
 	}
-	if forceTools {
-		payload["tool_choice"] = "required"
+	if len(tdefs) > 0 && !p.noTools.Load() {
+		payload["tools"] = tdefs
+		if forceTools {
+			payload["tool_choice"] = "required"
+		}
 	}
 	return payload
+}
+
+// isNoToolsErr matches Ollama's rejection of tool definitions.
+func isNoToolsErr(err error) bool {
+	var he *httpError
+	return errors.As(err, &he) && he.code == 400 &&
+		strings.Contains(he.msg, "does not support tools")
 }
 
 func (p *ollamaProvider) Chat(ctx context.Context, msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error) {
@@ -305,6 +334,10 @@ func (p *ollamaProvider) Chat(ctx context.Context, msgs []Msg, tools []ToolDef, 
 
 func (p *ollamaProvider) chatOnce(ctx context.Context, msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error) {
 	raw, err := postJSON(ctx, p.url+"/api/chat", nil, p.payload(msgs, tools, forceTools))
+	if err != nil && isNoToolsErr(err) {
+		p.noTools.Store(true) // degrade to tool-less chat for this model
+		raw, err = postJSON(ctx, p.url+"/api/chat", nil, p.payload(msgs, tools, false))
+	}
 	if err != nil {
 		return Msg{}, err
 	}
@@ -487,6 +520,19 @@ func (p *anthropicProvider) payload(msgs []Msg, tools []ToolDef, forceTools bool
 			}
 			messages = append(messages, map[string]any{"role": "user", "content": []map[string]any{block}})
 		default:
+			if len(m.Images) > 0 {
+				blocks := []map[string]any{}
+				for _, im := range m.Images {
+					blocks = append(blocks, map[string]any{
+						"type": "image",
+						"source": map[string]any{"type": "base64",
+							"media_type": im.MediaType, "data": im.DataB64},
+					})
+				}
+				blocks = append(blocks, map[string]any{"type": "text", "text": m.Content})
+				messages = append(messages, map[string]any{"role": "user", "content": blocks})
+				continue
+			}
 			messages = append(messages, map[string]any{"role": "user", "content": m.Content})
 		}
 	}
@@ -618,6 +664,19 @@ func (p *openaiProvider) payload(msgs []Msg, tools []ToolDef, forceTools bool) m
 				"role": "tool", "tool_call_id": m.CallID, "content": m.Content,
 			})
 		default:
+			if len(m.Images) > 0 {
+				parts := []map[string]any{{"type": "text", "text": m.Content}}
+				for _, im := range m.Images {
+					parts = append(parts, map[string]any{
+						"type": "image_url",
+						"image_url": map[string]any{
+							"url": "data:" + im.MediaType + ";base64," + im.DataB64,
+						},
+					})
+				}
+				messages = append(messages, map[string]any{"role": m.Role, "content": parts})
+				continue
+			}
 			messages = append(messages, map[string]any{"role": m.Role, "content": m.Content})
 		}
 	}

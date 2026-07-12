@@ -150,6 +150,12 @@ func (p *ollamaProvider) chatStreamOnce(ctx context.Context, msgs []Msg, tools [
 		}
 		return nil
 	})
+	if err != nil && isNoToolsErr(err) && !flushed {
+		// Tool-less models (most vision models) reject the definitions
+		// with HTTP 400 before any bytes stream — degrade and retry once.
+		p.noTools.Store(true)
+		return p.chatStreamOnce(ctx, msgs, tools, false, onText)
+	}
 	if err != nil {
 		return Msg{}, err
 	}

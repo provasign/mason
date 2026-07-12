@@ -101,6 +101,12 @@ secret-redacted like everything else, 30s/2MB bounded, and
 private/loopback addresses are refused unless `fetch_allow` explicitly
 lists them.
 
+**Image input**: name a screenshot in the task ("why does shot.png look
+broken?") and mason attaches it to the message — base64, harness-side, on
+all three provider wire formats (Ollama / Anthropic / OpenAI-compatible).
+`--image <path>` attaches explicitly (repeatable). Needs a vision-capable
+model; png/jpg/gif/webp, 8 MB bound.
+
 **LSP diagnostics at edit time**: mason auto-detects the project's language
 server (gopls, typescript-language-server, pyright/pylsp, rust-analyzer —
 whichever is installed), starts it lazily on the first edit, and pipes its

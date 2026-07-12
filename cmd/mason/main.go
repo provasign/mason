@@ -55,6 +55,8 @@ flags:
   --plan           plan mode: read-only session — mutating tools are refused by the harness
   --json           one-shot machine output: exactly one JSON object on stdout (CI/SDK)
   --max-cost <usd> hard cost budget: the task stops when the session estimate reaches it
+  --image <path>   attach an image to the task (repeatable; vision-capable models)
+                   images named in the task text are attached automatically
   --yes            skip permission prompts for bash/edit/write
   --no-tui         plain line-based REPL instead of the full-screen UI
   --max-turns <n>  per-task turn budget (default: 60 local, 30 API; 0 = unlimited)
@@ -173,6 +175,7 @@ func run(args []string) int {
 	jsonOut := false
 	maxCost := 0.0
 	maxTurns := 0
+	var images []string
 	var taskParts []string
 	for i := 0; i < len(args); i++ {
 		switch a := args[i]; a {
@@ -206,6 +209,11 @@ func run(args []string) int {
 		case "--max-cost":
 			if i+1 < len(args) {
 				fmt.Sscanf(args[i+1], "%f", &maxCost)
+				i++
+			}
+		case "--image":
+			if i+1 < len(args) {
+				images = append(images, args[i+1])
 				i++
 			}
 		case "--no-tui":
@@ -444,6 +452,12 @@ func run(args []string) int {
 	opts.ExtraTools = extraTools
 	opts.ExtraInvoke = extraInvoke
 	sess := agent.New(p, invoke, opts)
+	if len(images) > 0 {
+		if err := sess.AttachImages(images); err != nil {
+			fmt.Fprintln(os.Stderr, "mason: --image:", err)
+			return 1
+		}
+	}
 	if planMode {
 		sess.SetPlan(true)
 		fmt.Fprintln(os.Stderr, "plan mode ON — read-only session (mutating tools are refused; /plan off to disable)")
