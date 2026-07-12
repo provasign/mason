@@ -28,8 +28,8 @@ compile oracles, quality gates).
 7. ✅ `mason init` — generate MASON.md from the graph (v0.16)
 8. ✅ Session picker (v0.16: --resume / /sessions / /resume N, named + auto-titled)
 9. ✅ Web fetch tool (v0.16: gated, redacted, private-address guarded)
-10. Non-interactive JSON output for CI/SDK
-11. Cost budgets (--max-cost)
+10. ✅ Non-interactive JSON output for CI/SDK (v0.17: --json — one object on stdout)
+11. ✅ Cost budgets (v0.17: --max-cost — hard stop, paid-for answers still delivered)
 12. LSP diagnostics feed alongside the graph
 13. Image input for vision-capable models
 

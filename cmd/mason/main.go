@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/charmbracelet/glamour"
 	"github.com/peterh/liner"
@@ -50,6 +51,8 @@ flags:
   --continue       resume the latest conversation for this directory
   --resume [n]     pick a saved conversation to resume (list + prompt, or directly by number)
   --plan           plan mode: read-only session — mutating tools are refused by the harness
+  --json           one-shot machine output: exactly one JSON object on stdout (CI/SDK)
+  --max-cost <usd> hard cost budget: the task stops when the session estimate reaches it
   --yes            skip permission prompts for bash/edit/write
   --no-tui         plain line-based REPL instead of the full-screen UI
   --max-turns <n>  per-task turn budget (default: 60 local, 30 API; 0 = unlimited)
@@ -165,6 +168,8 @@ func run(args []string) int {
 	resumeSel := ""
 	planMode := false
 	noTUI := false
+	jsonOut := false
+	maxCost := 0.0
 	maxTurns := 0
 	var taskParts []string
 	for i := 0; i < len(args); i++ {
@@ -193,6 +198,14 @@ func run(args []string) int {
 			}
 		case "--plan":
 			planMode = true
+		case "--json":
+			jsonOut = true
+			noTUI = true
+		case "--max-cost":
+			if i+1 < len(args) {
+				fmt.Sscanf(args[i+1], "%f", &maxCost)
+				i++
+			}
 		case "--no-tui":
 			noTUI = true
 		case "--max-turns":
@@ -208,6 +221,10 @@ func run(args []string) int {
 		}
 	}
 	task := strings.TrimSpace(strings.Join(taskParts, " "))
+	if jsonOut && task == "" {
+		fmt.Fprintln(os.Stderr, "mason: --json requires a one-shot task")
+		return 2
+	}
 	interactive := term.IsTerminal(int(os.Stdin.Fd()))
 
 	if model == "" {
@@ -329,6 +346,17 @@ func run(args []string) int {
 		ProjectNotes: projectNotes(root), CtxChars: ctxChars,
 		Stream: true, Color: colorOut, NewProvider: factory,
 	}
+	opts.MaxCostUSD = maxCost
+	// model is a captured var — the estimator follows mid-session switches.
+	opts.CostFn = func(in, out, cr, cw int) float64 {
+		return provider.EstimateCostCached(model, in, out, cr, cw)
+	}
+	if jsonOut {
+		// stdout carries exactly one JSON object; narration goes to stderr.
+		opts.Out = os.Stderr
+		opts.Stream = false
+		opts.Color = false
+	}
 	if k != nil {
 		opts.FileSymbols = func(path string) []agent.SymbolInfo {
 			syms, err := k.FileSymbols(context.Background(), path)
@@ -432,8 +460,35 @@ func run(args []string) int {
 	}()
 
 	if task != "" {
-		_, err := interruptibleAsk(sess, task)
+		var before map[string]string
+		var start time.Time
+		if jsonOut {
+			before = gitStatusLines(root)
+			start = time.Now()
+		}
+		reply, err := interruptibleAsk(sess, task)
 		saveSession(sessFile, sess.History(), model, sessName)
+		if jsonOut {
+			in, out := sess.Usage()
+			cr, cw := sess.CacheUsage()
+			res := jsonResult{
+				OK:    err == nil,
+				Reply: reply,
+				Model: model,
+				Usage: jsonUsage{InputTokens: in, OutputTokens: out, CacheRead: cr, CacheWrite: cw,
+					CostUSD: provider.EstimateCostCached(model, in, out, cr, cw)},
+				ChangedFiles: changedBetween(before, gitStatusLines(root)),
+				DurationMS:   time.Since(start).Milliseconds(),
+			}
+			if err != nil {
+				res.Error = err.Error()
+			}
+			emitJSON(res)
+			if err != nil {
+				return 1
+			}
+			return 0
+		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "mason:", err)
 			return 1

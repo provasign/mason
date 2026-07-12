@@ -59,7 +59,15 @@ mason --model openrouter:qwen/qwen3-coder "task…"      # OpenRouter
 mason --model lmstudio:qwen2.5-coder-32b "task…"       # LM Studio local server
 mason --model oai:http://localhost:8000#my-model "task…" # any OpenAI-compatible server
 mason --dir ~/src/project --yes "task…"   # --yes skips bash/edit prompts
+mason --json --yes "task…"     # CI/SDK: one JSON object on stdout (reply, usage, changedFiles)
+mason --max-cost 0.50 "task…"  # hard cost budget — the task stops at the estimate
 ```
+
+`--json` keeps stdout machine-clean (narration goes to stderr) and reports
+`ok`, `reply`, `usage` (tokens + estimated cost), `changedFiles` (from git),
+and `durationMs` — pipe it straight into `jq` in a pipeline. `--max-cost`
+is enforced by the harness between model calls: a finished answer that is
+already paid for is still delivered; pending tool work is not started.
 
 Per-task **checkpointing**: every task snapshots the tree first (tracked +
 untracked, via unreferenced git objects — your HEAD/index never move);

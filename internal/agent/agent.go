@@ -90,6 +90,8 @@ type Options struct {
 	NoRedact     bool                           // disable secret redaction (default ON)
 	CompactRender int                           // cap items per rendered group (0 = show all)
 	Policy       *Policy                        // standing permissions (.mason/config.json)
+	MaxCostUSD   float64                        // stop when estimated session cost reaches this (0 = no budget)
+	CostFn       func(in, out, cacheRead, cacheWrite int) float64 // session-cost estimator for the budget
 	// Router picks a provider per task (model:auto). nil = fixed provider.
 	Router func(task string, graphShaped bool) provider.Provider
 	// ExtraTools are externally provided (MCP) tools; ExtraInvoke runs one.
@@ -438,6 +440,28 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 			s.usageOut += reply.Usage.Out
 			s.usageCacheR += reply.Usage.CacheRead
 			s.usageCacheW += reply.Usage.CacheWrite
+		}
+		// Cost budget (--max-cost): a hard stop, checked before any further
+		// spend. A finished answer is still delivered — it is already paid
+		// for; pending tool calls are NOT executed.
+		if s.opts.MaxCostUSD > 0 && s.opts.CostFn != nil {
+			cost := s.opts.CostFn(s.usageIn, s.usageOut, s.usageCacheR, s.usageCacheW)
+			if cost >= s.opts.MaxCostUSD {
+				if text := strings.TrimSpace(reply.Content); len(reply.Calls) == 0 && text != "" {
+					s.msgs = append(s.msgs, reply)
+					if !shown {
+						fmt.Fprintf(s.out, "\n%s\n", s.renderFinal(text))
+					}
+					fmt.Fprintf(s.out, "%s\n", s.st.yellow(fmt.Sprintf(
+						"⚠ cost budget reached: session ≈ $%.4f (--max-cost %.2f)", cost, s.opts.MaxCostUSD)))
+					return text, nil
+				}
+				s.msgs = append(s.msgs, provider.Msg{Role: "assistant",
+					Content: "[task stopped: cost budget reached before completion]"})
+				fmt.Fprintf(s.out, "%s\n", s.st.yellow(fmt.Sprintf(
+					"⚠ stopping: cost budget $%.2f reached (session ≈ $%.4f) — work may be incomplete", s.opts.MaxCostUSD, cost)))
+				return "", fmt.Errorf("cost budget $%.2f reached (session ≈ $%.4f)", s.opts.MaxCostUSD, cost)
+			}
 		}
 
 		if len(reply.Calls) == 0 {
