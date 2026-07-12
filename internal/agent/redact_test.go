@@ -32,6 +32,27 @@ func TestRedactSecrets(t *testing.T) {
 	}
 }
 
+// A test file full of dummy credential-shaped assignments should report a
+// per-kind breakdown (all "credential"), not an opaque total — that's how the
+// user tells fixtures from a real key leak.
+func TestRedactByKindBreakdown(t *testing.T) {
+	fixture := `password = "hunter2hunter2"
+token = "test-token-abcdef"
+api_key = "fake-key-abcdefgh"
+`
+	_, by := redactSecretsByKind(fixture)
+	if by["credential"] != 3 {
+		t.Fatalf("want 3 credential hits, got %+v", by)
+	}
+	if len(by) != 1 {
+		t.Fatalf("test fixtures should only trip the generic credential pattern: %+v", by)
+	}
+	got := summarizeKinds(map[string]int{"credential": 6, "anthropic-key": 1})
+	if got != "6×credential, 1×anthropic-key" {
+		t.Fatalf("breakdown must lead with the heaviest kind, got %q", got)
+	}
+}
+
 func TestRedactLeavesCleanCodeAlone(t *testing.T) {
 	clean := `def summarize(numbers):
     return {"min": min(numbers), "max": max(numbers)}

@@ -3,6 +3,8 @@ package agent
 import (
 	"fmt"
 	"regexp"
+	"sort"
+	"strings"
 )
 
 // Secret redaction: tool output (file reads, grep hits, bash output) is
@@ -38,11 +40,23 @@ var secretPatterns = []secretPattern{
 // redactSecrets replaces detected credential material with [REDACTED:kind]
 // markers and reports how many replacements were made.
 func redactSecrets(s string) (string, int) {
+	out, by := redactSecretsByKind(s)
 	n := 0
+	for _, c := range by {
+		n += c
+	}
+	return out, n
+}
+
+// redactSecretsByKind is redactSecrets with a per-kind tally, so the user can
+// tell 6×credential (almost always test fixtures) from 1×anthropic-key (a real
+// leak) instead of an opaque total.
+func redactSecretsByKind(s string) (string, map[string]int) {
+	by := map[string]int{}
 	for _, p := range secretPatterns {
 		if p.group == 0 {
 			s = p.re.ReplaceAllStringFunc(s, func(string) string {
-				n++
+				by[p.kind]++
 				return "[REDACTED:" + p.kind + "]"
 			})
 			continue
@@ -52,11 +66,31 @@ func redactSecrets(s string) (string, int) {
 			if sub == nil {
 				return m
 			}
-			n++
+			by[p.kind]++
 			return sub[1] + "[REDACTED:" + p.kind + "]" + sub[3]
 		})
 	}
-	return s, n
+	return s, by
+}
+
+// summarizeKinds renders a per-kind breakdown like "6×credential, 1×anthropic-key",
+// heaviest kind first, so the redaction notice is self-explaining.
+func summarizeKinds(by map[string]int) string {
+	kinds := make([]string, 0, len(by))
+	for k := range by {
+		kinds = append(kinds, k)
+	}
+	sort.Slice(kinds, func(i, j int) bool {
+		if by[kinds[i]] != by[kinds[j]] {
+			return by[kinds[i]] > by[kinds[j]]
+		}
+		return kinds[i] < kinds[j]
+	})
+	parts := make([]string, len(kinds))
+	for i, k := range kinds {
+		parts[i] = fmt.Sprintf("%d×%s", by[k], k)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // redact applies secret redaction when enabled (default), notifying the
@@ -65,9 +99,13 @@ func (s *Session) redact(content string) string {
 	if s.opts.NoRedact {
 		return content
 	}
-	out, n := redactSecrets(content)
+	out, by := redactSecretsByKind(content)
+	n := 0
+	for _, c := range by {
+		n += c
+	}
 	if n > 0 {
-		fmt.Fprintf(s.out, "  %s\n", s.st.yellow(fmt.Sprintf("🔒 %d secret(s) redacted before reaching the model", n)))
+		fmt.Fprintf(s.out, "  %s\n", s.st.yellow(fmt.Sprintf("🔒 %d secret(s) redacted before reaching the model (%s)", n, summarizeKinds(by))))
 	}
 	return out
 }
