@@ -92,6 +92,10 @@ type Options struct {
 	Policy       *Policy                        // standing permissions (.mason/config.json)
 	MaxCostUSD   float64                        // stop when estimated session cost reaches this (0 = no budget)
 	CostFn       func(in, out, cacheRead, cacheWrite int) float64 // session-cost estimator for the budget
+	// Diagnostics is the LSP feed: language-server findings for a file the
+	// agent just wrote (absolute path). Fed into the tool result so the
+	// model sees breakage at edit time. nil = disabled.
+	Diagnostics func(absPath string) []string
 	// Router picks a provider per task (model:auto). nil = fixed provider.
 	Router func(task string, graphShaped bool) provider.Provider
 	// ExtraTools are externally provided (MCP) tools; ExtraInvoke runs one.

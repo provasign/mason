@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/provasign/mason/internal/agent"
 	"github.com/provasign/mason/internal/creds"
 	"github.com/provasign/mason/internal/localmodels"
+	"github.com/provasign/mason/internal/lspclient"
 	"github.com/provasign/mason/internal/mcpclient"
 	"github.com/provasign/mason/internal/provider"
 	"github.com/provasign/mason/internal/tui"
@@ -391,6 +393,45 @@ func run(args []string) int {
 	}
 	opts.Policy = agent.LoadPolicy(root)
 	opts.Router = routerFn
+	// LSP diagnostics feed: lazily start the detected language server on
+	// the FIRST edit (read-only sessions never pay the boot cost) and pipe
+	// errors/warnings for each written file into the tool result.
+	var lspOnce sync.Once
+	var lspC *lspclient.Client
+	opts.Diagnostics = func(abs string) []string {
+		lspOnce.Do(func() {
+			name, command, argv, disabled := lspConfig(root)
+			if disabled || name == "" {
+				return
+			}
+			c, err := lspclient.Start(name, command, argv, root)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "⚠ lsp %s: %v — edit-time diagnostics off\n", name, err)
+				return
+			}
+			lspC = c
+			fmt.Fprintf(os.Stderr, "lsp: %s connected — edit-time diagnostics on\n", name)
+		})
+		if lspC == nil {
+			return nil
+		}
+		ds, err := lspC.Diagnostics(abs)
+		if err != nil {
+			return nil
+		}
+		var out []string
+		for _, d := range ds {
+			if d.Severity <= 2 { // errors + warnings; info/hints are noise here
+				out = append(out, d.String())
+			}
+		}
+		return out
+	}
+	defer func() {
+		if lspC != nil {
+			lspC.Close()
+		}
+	}()
 	// MCP servers from .mason/config.json → tools the model can call,
 	// gated and redacted like everything else.
 	mcpClients := connectMCP(root)
@@ -737,6 +778,32 @@ func run(args []string) int {
 	printCost(sess, model)
 	printSavings(k)
 	return 0
+}
+
+// lspConfig resolves the language server: an explicit "lsp" entry in
+// .mason/config.json wins ({"command": "...", "args": [...]} or
+// {"disabled": true}); otherwise auto-detection against installed servers.
+func lspConfig(root string) (name, command string, args []string, disabled bool) {
+	b, err := os.ReadFile(filepath.Join(root, ".mason", "config.json"))
+	if err == nil {
+		var cfg struct {
+			LSP *struct {
+				Command  string   `json:"command"`
+				Args     []string `json:"args"`
+				Disabled bool     `json:"disabled"`
+			} `json:"lsp"`
+		}
+		if json.Unmarshal(b, &cfg) == nil && cfg.LSP != nil {
+			if cfg.LSP.Disabled {
+				return "", "", nil, true
+			}
+			if cfg.LSP.Command != "" {
+				return filepath.Base(cfg.LSP.Command), cfg.LSP.Command, cfg.LSP.Args, false
+			}
+		}
+	}
+	name, command, args = lspclient.Detect(root)
+	return name, command, args, false
 }
 
 // connectMCP starts the servers configured under "mcp" in .mason/config.json.

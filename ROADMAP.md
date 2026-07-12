@@ -30,7 +30,7 @@ compile oracles, quality gates).
 9. ✅ Web fetch tool (v0.16: gated, redacted, private-address guarded)
 10. ✅ Non-interactive JSON output for CI/SDK (v0.17: --json — one object on stdout)
 11. ✅ Cost budgets (v0.17: --max-cost — hard stop, paid-for answers still delivered)
-12. LSP diagnostics feed alongside the graph
+12. ✅ LSP diagnostics feed alongside the graph (v0.18: edit-time, auto-detected server)
 13. Image input for vision-capable models
 
 ## P2 — polish and scale

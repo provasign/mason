@@ -101,6 +101,15 @@ secret-redacted like everything else, 30s/2MB bounded, and
 private/loopback addresses are refused unless `fetch_allow` explicitly
 lists them.
 
+**LSP diagnostics at edit time**: mason auto-detects the project's language
+server (gopls, typescript-language-server, pyright/pylsp, rust-analyzer —
+whichever is installed), starts it lazily on the first edit, and pipes its
+errors/warnings for each written file **into the same tool result as the
+edit**. The model sees `undefined: frobnicate` the moment it writes the
+call — not three turns later through a failing build. Configure or disable
+under `"lsp"` in `.mason/config.json`
+(`{"lsp": {"command": "gopls"}}` / `{"lsp": {"disabled": true}}`).
+
 ## Free local models — zero setup knowledge required
 
 ```

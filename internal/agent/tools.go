@@ -165,6 +165,35 @@ func diffSnippet(oldText, newText string) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// lspFeedback asks the language server about a just-written file and
+// formats its findings for the tool result — errors reach the model in the
+// SAME turn as the edit, not turns later through a failing build. Bounded
+// and best-effort: no server, no findings, no noise.
+func (s *Session) lspFeedback(abs, rel string) string {
+	if s.opts.Diagnostics == nil {
+		return ""
+	}
+	s.setStatus("lsp: checking %s", rel)
+	ds := s.opts.Diagnostics(abs)
+	if len(ds) == 0 {
+		return ""
+	}
+	const capN = 8
+	shownAll := len(ds) <= capN
+	if !shownAll {
+		ds = ds[:capN]
+	}
+	for _, d := range ds {
+		fmt.Fprintf(s.out, "  %s\n", s.st.yellow("◇ lsp "+rel+": "+d))
+	}
+	msg := "\n\nLanguage-server diagnostics for " + rel + " (fix these before proceeding):\n- " +
+		strings.Join(ds, "\n- ")
+	if !shownAll {
+		msg += "\n- …more suppressed; fix the above first"
+	}
+	return msg
+}
+
 // inRoot confines a model-supplied path to the project root. Symlinks and
 // ../ traversal cannot escape: the CLEANED absolute path must sit under root.
 func (s *Session) inRoot(rel string) (string, error) {
@@ -321,7 +350,7 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 		}
 		s.mutated = true
 		fmt.Fprintf(s.out, "  ✎ %s\n%s\n", path, s.colorDiff(diffSnippet(oldText, newText)))
-		return "edit applied", nil
+		return "edit applied" + s.lspFeedback(abs, path), nil
 
 	case "write_file":
 		path, _ := call.Args["path"].(string)
@@ -365,7 +394,7 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 			hb.WriteString("+ " + l + "\n")
 		}
 		fmt.Fprintf(s.out, "  ✎ %s (%d bytes)\n%s", path, len(content), s.colorDiff(strings.TrimRight(hb.String(), "\n"))+"\n")
-		return "file written", nil
+		return "file written" + s.lspFeedback(abs, path), nil
 
 	case "bash":
 		command, _ := call.Args["command"].(string)
