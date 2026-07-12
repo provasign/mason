@@ -8,7 +8,7 @@ require (
 	github.com/charmbracelet/glamour v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/peterh/liner v1.2.2
-	github.com/provasign/prism v0.23.1
+	github.com/provasign/prism v0.24.0
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/term v0.45.0
 )
@@ -44,7 +44,7 @@ require (
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/provasign/astkit v0.4.20 // indirect
-	github.com/provasign/grove v0.19.1 // indirect
+	github.com/provasign/grove v0.20.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82 // indirect
