@@ -2,3 +2,4 @@
 dist/
 .grove/
 .claude/settings.local.json
+.shale/
