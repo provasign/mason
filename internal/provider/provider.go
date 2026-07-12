@@ -140,9 +140,13 @@ func truncate(s string, n int) string {
 
 // NewProvider resolves a model spec to a provider:
 //
-//	ollama:<model>     local Ollama (default http://localhost:11434)
-//	claude:<model>     Anthropic API (ANTHROPIC_API_KEY)
-//	openai:<model>     OpenAI API (OPENAI_API_KEY)
+//	ollama:<model>       local Ollama (default http://localhost:11434)
+//	claude:<model>       Anthropic API (ANTHROPIC_API_KEY)
+//	openai:<model>       OpenAI API (OPENAI_API_KEY)
+//	openrouter:<model>   OpenRouter (OPENROUTER_API_KEY)
+//	lmstudio:<model>     LM Studio local server (LMSTUDIO_URL, default :1234)
+//	vllm:<model>         vLLM local server (VLLM_URL, default :8000)
+//	oai:<base-url>#<model>  any OpenAI-compatible server
 //
 // A bare spec with no prefix is treated as an Ollama model name.
 // getKey resolves the API key for a vendor ("anthropic" | "openai"); it is
@@ -168,6 +172,22 @@ func NewProvider(spec string, getKey func(vendor string) (string, error)) (Provi
 			return nil, fmt.Errorf("openai:%s: %w", model, err)
 		}
 		return &openaiProvider{model: model, key: key}, nil
+	case "openrouter":
+		key, err := getKey("openrouter")
+		if err != nil {
+			return nil, fmt.Errorf("openrouter:%s: %w", model, err)
+		}
+		return &openaiProvider{model: model, key: key, url: "https://openrouter.ai/api"}, nil
+	case "lmstudio":
+		return &openaiProvider{model: model, url: stripV1(envOr("LMSTUDIO_URL", "http://localhost:1234"))}, nil
+	case "vllm":
+		return &openaiProvider{model: model, url: stripV1(envOr("VLLM_URL", "http://localhost:8000"))}, nil
+	case "oai", "compat":
+		base, m, ok := strings.Cut(model, "#")
+		if !ok || base == "" || m == "" {
+			return nil, fmt.Errorf("oai spec must be oai:<base-url>#<model>")
+		}
+		return &openaiProvider{model: m, url: stripV1(base)}, nil
 	default:
 		// "qwen3-coder:30b" — the whole spec is an Ollama model tag.
 		return &ollamaProvider{model: spec, url: envOr("OLLAMA_HOST_URL", "http://localhost:11434")}, nil
@@ -202,6 +222,13 @@ func numCtx() int {
 		}
 	}
 	return 16384
+}
+
+// stripV1 normalizes an OpenAI-compatible base URL: the provider appends
+// /v1/chat/completions itself, so a user-supplied trailing /v1 is removed.
+func stripV1(base string) string {
+	base = strings.TrimRight(base, "/")
+	return strings.TrimSuffix(base, "/v1")
 }
 
 func envOr(k, def string) string {
@@ -537,6 +564,14 @@ type openaiProvider struct {
 	url   string // base URL, overridable for tests
 }
 
+// authHeaders omits Authorization for keyless local servers.
+func (p *openaiProvider) authHeaders() map[string]string {
+	if p.key == "" {
+		return nil
+	}
+	return map[string]string{"Authorization": "Bearer " + p.key}
+}
+
 func (p *openaiProvider) base() string {
 	if p.url != "" {
 		return p.url
@@ -593,9 +628,7 @@ func (p *openaiProvider) Chat(ctx context.Context, msgs []Msg, tools []ToolDef, 
 }
 
 func (p *openaiProvider) chatOnce(ctx context.Context, msgs []Msg, tools []ToolDef, forceTools bool) (Msg, error) {
-	raw, err := postJSON(ctx, p.base()+"/v1/chat/completions", map[string]string{
-		"Authorization": "Bearer " + p.key,
-	}, p.payload(msgs, tools, forceTools))
+	raw, err := postJSON(ctx, p.base()+"/v1/chat/completions", p.authHeaders(), p.payload(msgs, tools, forceTools))
 	if err != nil {
 		return Msg{}, scrub(err, p.key)
 	}

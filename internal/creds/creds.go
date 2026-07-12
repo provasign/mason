@@ -29,8 +29,9 @@ import (
 const service = "mason"
 
 var envVar = map[string]string{
-	"anthropic": "ANTHROPIC_API_KEY",
-	"openai":    "OPENAI_API_KEY",
+	"anthropic":  "ANTHROPIC_API_KEY",
+	"openai":     "OPENAI_API_KEY",
+	"openrouter": "OPENROUTER_API_KEY",
 }
 
 // Has reports whether a credential is available for vendor without
@@ -81,8 +82,9 @@ func Delete(vendor string) error {
 
 // keyPage is where each vendor issues API keys.
 var keyPage = map[string]string{
-	"anthropic": "https://console.anthropic.com/settings/keys",
-	"openai":    "https://platform.openai.com/api-keys",
+	"anthropic":  "https://console.anthropic.com/settings/keys",
+	"openai":     "https://platform.openai.com/api-keys",
+	"openrouter": "https://openrouter.ai/keys",
 }
 
 // openBrowser opens url in the default browser, best-effort.
@@ -106,7 +108,7 @@ func openBrowser(url string) bool {
 // OS keychain is the only place it is written.
 func Login(vendor string) error {
 	if _, ok := envVar[vendor]; !ok {
-		return fmt.Errorf("unknown provider %q (anthropic | openai)", vendor)
+		return fmt.Errorf("unknown provider %q (anthropic | openai | openrouter)", vendor)
 	}
 	page := keyPage[vendor]
 	fmt.Printf("Opening %s in your browser…\n", page)

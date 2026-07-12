@@ -285,8 +285,12 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 		s.setStatus("editing %s", path)
 		oldText, _ := call.Args["old_text"].(string)
 		newText, _ := call.Args["new_text"].(string)
-		if !s.permitDetail("edit "+path, diffSnippet(oldText, newText)) {
-			return "", fmt.Errorf("user denied edit of %s", path)
+		v := VerdictAsk
+		if s.opts.Policy != nil {
+			v = s.opts.Policy.PathVerdict("edit", path)
+		}
+		if ok, why := s.gate(v, "edit "+path, diffSnippet(oldText, newText)); !ok {
+			return "", fmt.Errorf("%s: edit of %s", why, path)
 		}
 		abs, aerr := s.inRoot(path)
 		if aerr != nil {
@@ -326,8 +330,12 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 		if lines := strings.SplitN(head, "\n", 21); len(lines) > 20 {
 			head = strings.Join(lines[:20], "\n") + "\n  …"
 		}
-		if !s.permitDetail("write "+path, detail+"\n"+head) {
-			return "", fmt.Errorf("user denied write of %s", path)
+		v := VerdictAsk
+		if s.opts.Policy != nil {
+			v = s.opts.Policy.PathVerdict("write", path)
+		}
+		if ok, why := s.gate(v, "write "+path, detail+"\n"+head); !ok {
+			return "", fmt.Errorf("%s: write of %s", why, path)
 		}
 		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 			return "", err
@@ -349,8 +357,12 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 
 	case "bash":
 		command, _ := call.Args["command"].(string)
-		if !s.permit("run: " + command) {
-			return "", fmt.Errorf("user denied command")
+		v := VerdictAsk
+		if s.opts.Policy != nil {
+			v = s.opts.Policy.BashVerdict(command)
+		}
+		if ok, why := s.gate(v, "run: "+command, ""); !ok {
+			return "", fmt.Errorf("%s: command", why)
 		}
 		s.setStatus("running: %s", truncate(command, 50))
 		fmt.Fprintf(s.out, "  $ %s\n", command)

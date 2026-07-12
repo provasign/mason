@@ -34,6 +34,7 @@ type Config struct {
 	Compact     func(ctx context.Context) (before, after int, err error)
 	SetRedact   func(on bool)
 	SetVerbose  func(on bool) // full tool renders vs compact head + "+N more"
+	Undo        func() (string, error)
 	Clear       func()
 	SaveSession func()
 }
@@ -474,6 +475,7 @@ commands:
   /cost          session token usage and cost
   /savings       graph-read token ledger
   /compact       summarize old history
+  /undo          revert the file changes of the last task (checkpointed per task)
   /auto [off]    blanket-approve bash/edit/write (or 'a' at any prompt)
   /verbose [off] full tool results (default: collapsed to a head + '+N more')
   /secrets [off] secret redaction (default on)
@@ -506,6 +508,22 @@ keys: mouse wheel or PgUp/PgDn scroll (Shift+drag to select text) · Ctrl+C canc
 			m.autoApprove = true
 			m.append("auto-approve ON — bash/edit/write run without asking (this session; /auto off to revert)\n")
 		}
+		return m, nil
+	case "/undo":
+		if m.busy {
+			m.append(errStyle.Render("a task is running — Ctrl+C first") + "\n")
+			return m, nil
+		}
+		if m.cfg.Undo == nil {
+			m.append(errStyle.Render("undo unavailable (not a git repository)") + "\n")
+			return m, nil
+		}
+		msg, err := m.cfg.Undo()
+		if err != nil {
+			m.append(errStyle.Render("undo: "+err.Error()) + "\n")
+			return m, nil
+		}
+		m.append("↩ " + msg + "\n")
 		return m, nil
 	case "/verbose":
 		arg := ""

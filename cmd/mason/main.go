@@ -268,6 +268,7 @@ func run(args []string) int {
 			}
 		}
 	}
+	opts.Policy = agent.LoadPolicy(root)
 	sess := agent.New(p, invoke, opts)
 	sessFile := sessionPath(root)
 	if cont {
@@ -338,6 +339,7 @@ func run(args []string) int {
 			Compact:     sess.Compact,
 			Clear:       sess.Clear,
 			SetRedact:   sess.SetRedact,
+			Undo: sess.Undo,
 			SetVerbose: func(on bool) {
 				if on {
 					sess.SetCompactRender(0)

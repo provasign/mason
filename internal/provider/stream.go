@@ -272,9 +272,7 @@ func (p *openaiProvider) chatStreamOnce(ctx context.Context, msgs []Msg, tools [
 	}
 	calls := map[int]*acc{}
 	maxIdx := -1
-	err := postStream(ctx, p.base()+"/v1/chat/completions", map[string]string{
-		"Authorization": "Bearer " + p.key,
-	}, payload, func(line []byte) error {
+	err := postStream(ctx, p.base()+"/v1/chat/completions", p.authHeaders(), payload, func(line []byte) error {
 		data, ok := sseData(line)
 		if !ok || string(data) == "[DONE]" {
 			return nil

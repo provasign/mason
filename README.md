@@ -52,7 +52,27 @@ mason "task…"                  # one-shot
 mason --continue "follow-up…"  # resume this repo's previous conversation
 mason --model ollama:qwen3-coder:30b "task…"
 mason --model claude:claude-haiku-4-5-20251001 "task…"
+mason --model openrouter:qwen/qwen3-coder "task…"      # OpenRouter
+mason --model lmstudio:qwen2.5-coder-32b "task…"       # LM Studio local server
+mason --model oai:http://localhost:8000#my-model "task…" # any OpenAI-compatible server
 mason --dir ~/src/project --yes "task…"   # --yes skips bash/edit prompts
+```
+
+Per-task **checkpointing**: every task snapshots the tree first (tracked +
+untracked, via unreferenced git objects — your HEAD/index never move);
+`/undo` reverts the last task's file changes.
+
+**Standing permissions** in `.mason/config.json` — allow-listed commands run
+without prompting, denied paths are hard lines that even `--yes` cannot
+cross:
+
+```json
+{"permissions": {
+  "bash": "ask", "edit": "allow", "write": "ask",
+  "bash_allow": ["go test *", "go build *", "git status"],
+  "bash_deny":  ["git push *"],
+  "paths_deny": [".env*", "secrets/**", "*.pem"]
+}}
 ```
 
 ## Free local models — zero setup knowledge required

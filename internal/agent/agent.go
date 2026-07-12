@@ -89,6 +89,7 @@ type Options struct {
 	Status       func(activity string)          // live activity narration for the UI status bar
 	NoRedact     bool                           // disable secret redaction (default ON)
 	CompactRender int                           // cap items per rendered group (0 = show all)
+	Policy       *Policy                        // standing permissions (.mason/config.json)
 }
 
 // SetCompactRender adjusts the per-group render cap mid-session (/verbose).
@@ -115,6 +116,8 @@ type Session struct {
 	msgs     []provider.Msg
 
 	lastRenamePlan map[string]any
+	checkpoints    []string // snapshot commits, newest last (/undo)
+	pendingNote    string   // folded into the next task message (e.g. undo notice)
 	mutated        bool  // any mutating tool ran during the current Ask
 	usageIn        int   // session-total input tokens
 	usageOut       int   // session-total output tokens
@@ -286,6 +289,21 @@ func (s *Session) permit(action string) bool {
 	return s.opts.Permit(action)
 }
 
+// gate applies the project policy first (deny is final — even --yes cannot
+// cross a policy deny), then falls back to the interactive prompt.
+func (s *Session) gate(v Verdict, action, detail string) (bool, string) {
+	switch v {
+	case VerdictAllow:
+		fmt.Fprintf(s.out, "  %s\n", s.st.dim("policy-allowed: "+action))
+		return true, ""
+	case VerdictDeny:
+		fmt.Fprintf(s.out, "  %s\n", s.st.yellow("policy-DENIED: "+action))
+		return false, "denied by project policy (.mason/config.json)"
+	default:
+		return s.permitDetail(action, detail), "user denied"
+	}
+}
+
 // permitDetail gates an action while SHOWING the user what it will do —
 // the diff for an edit, the content head for a write, the counts for a
 // rename apply. Falls back to the plain gate when no detail handler is set.
@@ -312,6 +330,11 @@ func (s *Session) renderFinal(text string) string {
 // returns the model's final text reply. Cancelling ctx stops cleanly after
 // the in-flight step: the conversation stays consistent for the next Ask.
 func (s *Session) Ask(ctx context.Context, task string) (string, error) {
+	s.checkpoint()
+	if s.pendingNote != "" {
+		task = s.pendingNote + "\n\n" + task
+		s.pendingNote = ""
+	}
 	s.msgs = append(s.msgs, provider.Msg{Role: "user", Content: task})
 	tr := trail.New(s.root, task)
 	defer tr.Done()
