@@ -60,6 +60,8 @@ func toolDefs() []provider.ToolDef {
 			Parameters: obj(map[string]any{"path": str("file path"), "content": str("full file content")}, "path", "content")},
 		{Name: "bash", Description: "Run a shell command in the project root (build, test, git). Output is truncated.",
 			Parameters: obj(map[string]any{"command": str("shell command")}, "command")},
+		{Name: "web_fetch", Description: "Fetch an http(s) URL and return its content as plain text (HTML is converted). Use for documentation, APIs, changelogs. Gated and bounded.",
+			Parameters: obj(map[string]any{"url": str("absolute http(s) URL")}, "url")},
 		{Name: "subagent", Description: "Delegate a self-contained subtask (broad exploration, multi-file survey, isolated analysis or change) to a fresh agent with its own empty context and the same tools. Only its final summary returns to you — its intermediate reads never consume your context. Use for work whose raw output would be large.",
 			Parameters: obj(map[string]any{
 				"task":  str("complete, self-contained instructions for the subagent"),
@@ -280,8 +282,15 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 		}
 		return truncate(strings.Join(files, "\n"), maxToolOutput), nil
 
+	case "web_fetch":
+		rawURL, _ := call.Args["url"].(string)
+		return s.fetchWebURL(ctx, rawURL)
+
 	case "edit_file":
 		path, _ := call.Args["path"].(string)
+		if s.plan {
+			return "", errPlan("edit of " + path)
+		}
 		s.setStatus("editing %s", path)
 		oldText, _ := call.Args["old_text"].(string)
 		newText, _ := call.Args["new_text"].(string)
@@ -316,6 +325,9 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 
 	case "write_file":
 		path, _ := call.Args["path"].(string)
+		if s.plan {
+			return "", errPlan("write of " + path)
+		}
 		s.setStatus("writing %s", path)
 		content, _ := call.Args["content"].(string)
 		abs, aerr := s.inRoot(path)
@@ -357,6 +369,9 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 
 	case "bash":
 		command, _ := call.Args["command"].(string)
+		if s.plan && !planSafeBash(command) {
+			return "", errPlan("command " + truncate(command, 60))
+		}
 		v := VerdictAsk
 		if s.opts.Policy != nil {
 			v = s.opts.Policy.BashVerdict(command)

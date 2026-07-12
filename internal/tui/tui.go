@@ -34,6 +34,10 @@ type Config struct {
 	Compact     func(ctx context.Context) (before, after int, err error)
 	SetRedact   func(on bool)
 	SetVerbose  func(on bool) // full tool renders vs compact head + "+N more"
+	SetPlan     func(on bool) // read-only (plan) mode toggle
+	PlanOn      bool          // plan mode active at startup (--plan)
+	Sessions    func() string // rendered saved-session list
+	Resume      func(sel string) (string, error) // switch conversation ("N") or name it ("name …")
 	Undo        func() (string, error)
 	Review      func(base string) (warns int, text string, err error)
 	Clear       func()
@@ -149,6 +153,7 @@ type uiModel struct {
 	taskStart time.Time // for the elapsed display
 	autoApprove bool    // blanket approval (/auto, or 'a' at a prompt)
 	redactOff   bool    // /secrets off
+	planOn      bool    // /plan — read-only mode indicator
 	// /models pick lists: 1..len(pickInstalled) switch instantly,
 	// continuing numbers download via ExecProcess.
 	pickInstalled []string
@@ -163,7 +168,8 @@ func newModel(u *UI, cfg Config) uiModel {
 	in.SetHeight(1)
 	in.Focus()
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
-	return uiModel{ui: u, cfg: cfg, in: in, sp: sp, model: cfg.ModelName, buf: &strings.Builder{}}
+	return uiModel{ui: u, cfg: cfg, in: in, sp: sp, model: cfg.ModelName,
+		planOn: cfg.PlanOn, buf: &strings.Builder{}}
 }
 
 // syncInputHeight grows the textarea with its content, counting soft-wrapped
@@ -278,6 +284,9 @@ func (m *uiModel) statusLine() string {
 	}
 	if m.autoApprove {
 		hint += "  [AUTO]"
+	}
+	if m.planOn {
+		hint += "  [PLAN]"
 	}
 	return statusStyle.Render(fmt.Sprintf(" %s%s · %s%s", state, usage, m.model, hint))
 }
@@ -477,6 +486,9 @@ commands:
   /savings       graph-read token ledger
   /compact       summarize old history
   /review [base] engine-verified diff review (blast radius, coverage, stubs)
+  /plan [off]    read-only mode: investigate + plan, harness refuses mutations
+  /sessions      list saved conversations for this directory
+  /resume N      switch to saved conversation N — /resume name <x> names this one
   /undo          revert the file changes of the last task (checkpointed per task)
   /auto [off]    blanket-approve bash/edit/write (or 'a' at any prompt)
   /verbose [off] full tool results (default: collapsed to a head + '+N more')
@@ -559,6 +571,52 @@ keys: mouse wheel or PgUp/PgDn scroll (Shift+drag to select text) · Ctrl+C canc
 			return m, nil
 		}
 		m.append("↩ " + msg + "\n")
+		return m, nil
+	case "/plan":
+		arg := ""
+		if len(fields) > 1 {
+			arg = fields[1]
+		}
+		if m.cfg.SetPlan == nil {
+			m.append(errStyle.Render("plan mode unavailable") + "\n")
+			return m, nil
+		}
+		if arg == "off" {
+			m.planOn = false
+			m.cfg.SetPlan(false)
+			m.append("plan mode OFF — edits are enabled again\n")
+		} else {
+			m.planOn = true
+			m.cfg.SetPlan(true)
+			m.append("plan mode ON — read-only: the agent investigates and plans; the harness refuses mutations (/plan off to disable)\n")
+		}
+		return m, nil
+	case "/sessions":
+		if m.cfg.Sessions == nil {
+			m.append(errStyle.Render("sessions unavailable") + "\n")
+			return m, nil
+		}
+		m.append("\n" + m.cfg.Sessions() + "\n")
+		return m, nil
+	case "/resume":
+		if m.cfg.Resume == nil {
+			m.append(errStyle.Render("resume unavailable") + "\n")
+			return m, nil
+		}
+		if m.busy {
+			m.append(errStyle.Render("a task is running — Ctrl+C first") + "\n")
+			return m, nil
+		}
+		if len(fields) < 2 {
+			m.append("\n" + m.cfg.Sessions() + "\n")
+			return m, nil
+		}
+		msg, err := m.cfg.Resume(strings.TrimSpace(strings.TrimPrefix(line, "/resume")))
+		if err != nil {
+			m.append(errStyle.Render("resume: "+err.Error()) + "\n")
+			return m, nil
+		}
+		m.append("↺ " + msg + "\n")
 		return m, nil
 	case "/verbose":
 		arg := ""

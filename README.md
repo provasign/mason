@@ -49,7 +49,10 @@ go install github.com/provasign/mason/cmd/mason@latest   # or grab a release bin
 ```
 mason                          # interactive REPL in the current repo
 mason "task…"                  # one-shot
-mason --continue "follow-up…"  # resume this repo's previous conversation
+mason --continue "follow-up…"  # resume this repo's latest conversation
+mason --resume                 # pick any saved conversation (list + prompt)
+mason --plan "how would we…"   # plan mode: read-only, mutations refused by the harness
+mason init                     # generate MASON.md (project map) from the tree + code graph
 mason --model ollama:qwen3-coder:30b "task…"
 mason --model claude:claude-haiku-4-5-20251001 "task…"
 mason --model openrouter:qwen/qwen3-coder "task…"      # OpenRouter
@@ -71,9 +74,24 @@ cross:
   "bash": "ask", "edit": "allow", "write": "ask",
   "bash_allow": ["go test *", "go build *", "git status"],
   "bash_deny":  ["git push *"],
-  "paths_deny": [".env*", "secrets/**", "*.pem"]
+  "paths_deny": [".env*", "secrets/**", "*.pem"],
+  "fetch": "ask",
+  "fetch_allow": ["https://pkg.go.dev/*"]
 }}
 ```
+
+**Plan mode** (`--plan`, or `/plan` in a session) makes the session
+structurally read-only: the agent investigates with every read tool and
+answers with a concrete plan, while `edit_file`, `write_file`,
+`apply_rename_plan`, MCP calls, and non-read-only bash are refused **by the
+harness** — not by asking the model to behave. `/plan off` re-enables edits
+to apply the plan.
+
+**Web fetch**: the model can pull an http(s) page as plain text
+(`web_fetch`) for docs and changelogs — permission-gated like bash,
+secret-redacted like everything else, 30s/2MB bounded, and
+private/loopback addresses are refused unless `fetch_allow` explicitly
+lists them.
 
 ## Free local models — zero setup knowledge required
 
@@ -111,8 +129,15 @@ Anthropic, OpenAI). In either mode:
 `/model <spec>` switches models mid-conversation, `/cost` shows session
 tokens and an estimated $ figure, `/savings` the graph-read ledger,
 `/compact` summarizes old history (also automatic as context fills),
-`/clear`, `/help`, `/exit`. Sessions persist per repo; `--continue` resumes.
-`AGENTS.md` / `MASON.md` at the root are loaded as project instructions.
+`/plan` toggles read-only mode, `/clear`, `/help`, `/exit`.
+
+**Sessions persist per repo** — every conversation is kept. `--continue`
+resumes the latest; `mason --resume` (or `/sessions` + `/resume N` inside a
+session) lists them with auto-titles and lets you pick; `/resume name <x>`
+names the current one. `mason sessions` prints the list headlessly.
+`AGENTS.md` / `MASON.md` at the root are loaded as project instructions —
+`mason init` generates a MASON.md project map (layout, build/test commands,
+entry points, graph stats) deterministically from the tree and code graph.
 
 **Subagents**: the model can delegate a self-contained subtask ("survey how
 X is structured", an isolated analysis) to a fresh agent with its own empty

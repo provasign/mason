@@ -6,13 +6,12 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -36,6 +35,8 @@ const usage = `mason — coding agent with the code graph baked in
 usage:
   mason [flags] ["task"]        one-shot task, or interactive REPL if omitted
   mason review [--base <ref>] [--strict]   engine-verified diff review (no model; --strict fails CI on warnings)
+  mason init [--force]          generate MASON.md (project map) from the tree + code graph
+  mason sessions                list saved conversations for this directory
   mason models                  browse, download, and pick free local models
   mason login <anthropic|openai>    store an API key in the OS keychain
   mason logout <anthropic|openai>   remove a stored API key
@@ -46,12 +47,15 @@ flags:
                    lmstudio:<m> | vllm:<m> | oai:<url>#<m> | auto  (default: auto-detect)
                    auto = measured tier routing: graph tasks → small local, coding → best local
   --dir <path>     project root (default: current directory)
-  --continue       resume the previous conversation for this directory
+  --continue       resume the latest conversation for this directory
+  --resume [n]     pick a saved conversation to resume (list + prompt, or directly by number)
+  --plan           plan mode: read-only session — mutating tools are refused by the harness
   --yes            skip permission prompts for bash/edit/write
   --no-tui         plain line-based REPL instead of the full-screen UI
   --max-turns <n>  per-task turn budget (default: 60 local, 30 API; 0 = unlimited)
 
-REPL commands: /models  /model <spec>  /cost  /savings  /compact  /clear  /help  /exit
+REPL commands: /models  /model <spec>  /plan  /sessions  /resume N  /cost  /savings
+               /compact  /clear  /help  /exit
 
 Project instructions: AGENTS.md and MASON.md at the root are loaded into the
 system prompt automatically.
@@ -117,6 +121,22 @@ func run(args []string) int {
 				}
 			}
 			return runReview(base, strict)
+		case "init":
+			force := false
+			for _, a := range args[1:] {
+				if a == "--force" || a == "-f" {
+					force = true
+				}
+			}
+			return runInit(force)
+		case "sessions":
+			root, err := filepath.Abs(".")
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "sessions:", err)
+				return 1
+			}
+			fmt.Println(renderSessions(listSessions(root)))
+			return 0
 		case "models":
 			interactive := term.IsTerminal(int(os.Stdin.Fd()))
 			spec, err := localmodels.Wizard(interactive)
@@ -141,6 +161,9 @@ func run(args []string) int {
 	model := ""
 	yes := false
 	cont := false
+	resume := false
+	resumeSel := ""
+	planMode := false
 	noTUI := false
 	maxTurns := 0
 	var taskParts []string
@@ -160,6 +183,16 @@ func run(args []string) int {
 			yes = true
 		case "--continue", "-c":
 			cont = true
+		case "--resume", "-r":
+			resume = true
+			if i+1 < len(args) {
+				if _, err := strconv.Atoi(args[i+1]); err == nil {
+					resumeSel = args[i+1]
+					i++
+				}
+			}
+		case "--plan":
+			planMode = true
 		case "--no-tui":
 			noTUI = true
 		case "--max-turns":
@@ -342,19 +375,57 @@ func run(args []string) int {
 	opts.ExtraTools = extraTools
 	opts.ExtraInvoke = extraInvoke
 	sess := agent.New(p, invoke, opts)
-	sessFile := sessionPath(root)
-	if cont {
-		if msgs, m, err := loadSession(sessFile); err == nil {
-			sess.SetHistory(msgs)
-			fmt.Fprintf(os.Stderr, "resumed %d messages (last model %s)\n", len(msgs), m)
-		} else {
+	if planMode {
+		sess.SetPlan(true)
+		fmt.Fprintln(os.Stderr, "plan mode ON — read-only session (mutating tools are refused; /plan off to disable)")
+	}
+	sessName := ""
+	sessFile := sessionPathFor(root, newSessionID())
+	if cont || resume {
+		metas := listSessions(root)
+		var pick *sessionMeta
+		switch {
+		case len(metas) == 0:
+			// nothing to resume
+		case cont || (!interactive && resumeSel == ""):
+			pick = &metas[0]
+		case resumeSel != "":
+			if n, err := strconv.Atoi(resumeSel); err == nil && n >= 1 && n <= len(metas) {
+				pick = &metas[n-1]
+			} else {
+				fmt.Fprintf(os.Stderr, "no session #%s — pick from:\n%s\n", resumeSel, renderSessions(metas))
+				return 2
+			}
+		default:
+			fmt.Fprintln(os.Stderr, renderSessions(metas))
+			fmt.Fprint(os.Stderr, "resume which? [1] ")
+			r := bufio.NewReader(os.Stdin)
+			ans, _ := r.ReadString('\n')
+			n := 1
+			if t := strings.TrimSpace(ans); t != "" {
+				if v, err := strconv.Atoi(t); err == nil {
+					n = v
+				}
+			}
+			if n >= 1 && n <= len(metas) {
+				pick = &metas[n-1]
+			}
+		}
+		if pick == nil {
 			fmt.Fprintln(os.Stderr, "no previous session to continue")
+		} else if sf, err := loadSessionFile(pick.Path); err == nil {
+			sess.SetHistory(sf.Messages)
+			sessName = sf.Name
+			if pick.ID != "legacy" {
+				sessFile = pick.Path // keep appending to the resumed conversation
+			}
+			fmt.Fprintf(os.Stderr, "resumed %q — %d messages (last model %s)\n", pick.Label, len(sf.Messages), sf.Model)
 		}
 	}
 
 	defer func() {
 		if r := recover(); r != nil {
-			saveSession(sessFile, sess.History(), model)
+			saveSession(sessFile, sess.History(), model, sessName)
 			fmt.Fprintf(os.Stderr, "mason: internal error (session saved): %v\n", r)
 			os.Exit(1)
 		}
@@ -362,7 +433,7 @@ func run(args []string) int {
 
 	if task != "" {
 		_, err := interruptibleAsk(sess, task)
-		saveSession(sessFile, sess.History(), model)
+		saveSession(sessFile, sess.History(), model, sessName)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "mason:", err)
 			return 1
@@ -428,7 +499,34 @@ func run(args []string) int {
 					sess.SetCompactRender(6)
 				}
 			},
-			SaveSession: func() { saveSession(sessFile, sess.History(), model) },
+			SetPlan:  sess.SetPlan,
+			PlanOn:   planMode,
+			Sessions: func() string { return renderSessions(listSessions(root)) },
+			Resume: func(sel string) (string, error) {
+				if rest, ok := strings.CutPrefix(sel, "name "); ok {
+					sessName = strings.TrimSpace(rest)
+					saveSession(sessFile, sess.History(), model, sessName)
+					return "session named " + strconv.Quote(sessName), nil
+				}
+				metas := listSessions(root)
+				n, err := strconv.Atoi(strings.TrimSpace(sel))
+				if err != nil || n < 1 || n > len(metas) {
+					return "", fmt.Errorf("no session %q — /sessions for the list", sel)
+				}
+				sf, err := loadSessionFile(metas[n-1].Path)
+				if err != nil {
+					return "", err
+				}
+				// Persist the current conversation before switching away.
+				saveSession(sessFile, sess.History(), model, sessName)
+				sess.SetHistory(sf.Messages)
+				sessName = sf.Name
+				if metas[n-1].ID != "legacy" {
+					sessFile = metas[n-1].Path
+				}
+				return fmt.Sprintf("resumed %q — %d messages", metas[n-1].Label, len(sf.Messages)), nil
+			},
+			SaveSession: func() { saveSession(sessFile, sess.History(), model, sessName) },
 		})
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "mason:", err)
@@ -444,7 +542,7 @@ func run(args []string) int {
 	fmt.Println(`type a task — /help for commands, /exit to quit`)
 	rl := liner.NewLiner()
 	rl.SetCtrlCAborts(true)
-	histPath := filepath.Join(filepath.Dir(sessionPath(root)), "..", "history")
+	histPath := filepath.Join(cacheBase(), "mason", "history")
 	if f, err := os.Open(histPath); err == nil {
 		_, _ = rl.ReadHistory(f)
 		f.Close()
@@ -488,6 +586,46 @@ func run(args []string) int {
 		case line == "/clear":
 			sess.Clear()
 			fmt.Println("conversation cleared")
+			continue
+		case strings.HasPrefix(line, "/plan"):
+			arg := strings.TrimSpace(strings.TrimPrefix(line, "/plan"))
+			if arg == "off" {
+				sess.SetPlan(false)
+				fmt.Println("plan mode OFF — edits are enabled again")
+			} else {
+				sess.SetPlan(true)
+				fmt.Println("plan mode ON — read-only: the agent investigates and plans, the harness refuses mutations (/plan off to disable)")
+			}
+			continue
+		case line == "/sessions":
+			fmt.Println(renderSessions(listSessions(root)))
+			continue
+		case strings.HasPrefix(line, "/resume"):
+			sel := strings.TrimSpace(strings.TrimPrefix(line, "/resume"))
+			if rest, ok := strings.CutPrefix(sel, "name "); ok {
+				sessName = strings.TrimSpace(rest)
+				saveSession(sessFile, sess.History(), model, sessName)
+				fmt.Printf("session named %q\n", sessName)
+				continue
+			}
+			metas := listSessions(root)
+			n, err := strconv.Atoi(sel)
+			if err != nil || n < 1 || n > len(metas) {
+				fmt.Println(renderSessions(metas))
+				continue
+			}
+			sf, err := loadSessionFile(metas[n-1].Path)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "resume:", err)
+				continue
+			}
+			saveSession(sessFile, sess.History(), model, sessName)
+			sess.SetHistory(sf.Messages)
+			sessName = sf.Name
+			if metas[n-1].ID != "legacy" {
+				sessFile = metas[n-1].Path
+			}
+			fmt.Printf("resumed %q — %d messages\n", metas[n-1].Label, len(sf.Messages))
 			continue
 		case line == "/compact":
 			before, after, err := sess.Compact(context.Background())
@@ -536,7 +674,7 @@ func run(args []string) int {
 			continue
 		}
 		_, err = interruptibleAsk(sess, line)
-		saveSession(sessFile, sess.History(), model)
+		saveSession(sessFile, sess.History(), model, sessName)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "mason:", err)
 		}
@@ -671,7 +809,8 @@ func runReview(base string, strict bool) int {
 func detectModel(root string, interactive bool) string {
 	// Sticky per-repo default: reuse the model last used here, if it is
 	// still available.
-	if _, last, err := loadSession(sessionPath(root)); err == nil && last != "" {
+	if metas := listSessions(root); len(metas) > 0 {
+		last := metas[0].Model
 		if strings.HasPrefix(last, "ollama:") || !strings.Contains(last, ":") {
 			tag := strings.TrimPrefix(last, "ollama:")
 			for _, t := range localmodels.Detect().Installed {
@@ -736,50 +875,6 @@ func projectNotes(root string) string {
 		parts = append(parts, "## "+name+"\n"+txt)
 	}
 	return strings.Join(parts, "\n\n")
-}
-
-// sessionPath is the per-root conversation store (no credentials ever).
-func sessionPath(root string) string {
-	sum := sha1.Sum([]byte(root))
-	base, err := os.UserCacheDir()
-	if err != nil || base == "" {
-		base = os.TempDir()
-	}
-	return filepath.Join(base, "mason", "sessions", hex.EncodeToString(sum[:])+".json")
-}
-
-type sessionFile struct {
-	Model    string         `json:"model"`
-	Messages []provider.Msg `json:"messages"`
-}
-
-func saveSession(path string, msgs []provider.Msg, model string) {
-	// Cap persisted history so the session file cannot grow without bound;
-	// the system prompt is regenerated on load, so drop it and keep the tail.
-	const keep = 400
-	if len(msgs) > keep {
-		msgs = msgs[len(msgs)-keep:]
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return
-	}
-	b, err := json.Marshal(sessionFile{Model: model, Messages: msgs})
-	if err != nil {
-		return
-	}
-	_ = os.WriteFile(path, b, 0o600)
-}
-
-func loadSession(path string) ([]provider.Msg, string, error) {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, "", err
-	}
-	var sf sessionFile
-	if err := json.Unmarshal(b, &sf); err != nil {
-		return nil, "", err
-	}
-	return sf.Messages, sf.Model, nil
 }
 
 func printCost(sess *agent.Session, model string) {

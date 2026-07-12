@@ -20,16 +20,22 @@ import (
 //	    "write": "allow",
 //	    "bash_allow": ["go test *", "go build *", "git status"],
 //	    "bash_deny":  ["git push *", "rm -rf *"],
-//	    "paths_deny": [".env*", "secrets/**", "*.pem"]
+//	    "paths_deny": [".env*", "secrets/**", "*.pem"],
+//	    "fetch": "ask",
+//	    "fetch_allow": ["https://pkg.go.dev/*"],
+//	    "fetch_deny":  ["*internal.corp*"]
 //	  }
 //	}
 type Policy struct {
-	Bash      string   `json:"bash"`
-	Edit      string   `json:"edit"`
-	Write     string   `json:"write"`
-	BashAllow []string `json:"bash_allow"`
-	BashDeny  []string `json:"bash_deny"`
-	PathsDeny []string `json:"paths_deny"`
+	Bash       string   `json:"bash"`
+	Edit       string   `json:"edit"`
+	Write      string   `json:"write"`
+	Fetch      string   `json:"fetch"` // web_fetch: allow | ask | deny (default ask)
+	BashAllow  []string `json:"bash_allow"`
+	BashDeny   []string `json:"bash_deny"`
+	PathsDeny  []string `json:"paths_deny"`
+	FetchAllow []string `json:"fetch_allow"` // URL wildcards fetched without asking
+	FetchDeny  []string `json:"fetch_deny"`
 }
 
 // Verdict is a policy decision for one action.
@@ -96,6 +102,21 @@ func (p *Policy) BashVerdict(command string) Verdict {
 		}
 	}
 	return modeVerdict(p.Bash)
+}
+
+// FetchVerdict: deny list wins, then allow list, then the fetch mode.
+func (p *Policy) FetchVerdict(rawURL string) Verdict {
+	for _, pat := range p.FetchDeny {
+		if wildMatch(pat, rawURL) {
+			return VerdictDeny
+		}
+	}
+	for _, pat := range p.FetchAllow {
+		if wildMatch(pat, rawURL) {
+			return VerdictAllow
+		}
+	}
+	return modeVerdict(p.Fetch)
 }
 
 // PathVerdict gates edit/write against denied paths, then the tool mode.

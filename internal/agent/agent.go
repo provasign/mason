@@ -124,6 +124,7 @@ type Session struct {
 	lastRenamePlan map[string]any
 	checkpoints    []string // snapshot commits, newest last (/undo)
 	pendingNote    string   // folded into the next task message (e.g. undo notice)
+	plan           bool  // read-only (plan) mode: mutating tools are refused
 	mutated        bool  // any mutating tool ran during the current Ask
 	usageIn        int   // session-total input tokens
 	usageOut       int   // session-total output tokens
@@ -336,10 +337,15 @@ func (s *Session) renderFinal(text string) string {
 // returns the model's final text reply. Cancelling ctx stops cleanly after
 // the in-flight step: the conversation stays consistent for the next Ask.
 func (s *Session) Ask(ctx context.Context, task string) (string, error) {
-	s.checkpoint()
+	if !s.plan {
+		s.checkpoint() // nothing to undo in a read-only task
+	}
 	if s.pendingNote != "" {
 		task = s.pendingNote + "\n\n" + task
 		s.pendingNote = ""
+	}
+	if s.plan {
+		task = planNote + "\n\n" + task
 	}
 	s.msgs = append(s.msgs, provider.Msg{Role: "user", Content: task})
 	tr := trail.New(s.root, task)
@@ -522,7 +528,8 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 			}
 			// Honesty guard: a change was requested but the tree is untouched —
 			// the summary would be a fabrication. Reject once, demand the tool.
-			if mutationIntent.MatchString(task) && !s.treeChanged(startFP) {
+			// Plan mode is exempt: not changing the tree is the whole point.
+			if !s.plan && mutationIntent.MatchString(task) && !s.treeChanged(startFP) {
 				if !nudged {
 					nudged = true
 					s.msgs = append(s.msgs, reply, provider.Msg{Role: "user",
@@ -601,6 +608,9 @@ func (s *Session) dispatch(ctx context.Context, call provider.ToolCall, tr *trai
 	}
 
 	if call.Name == "apply_rename_plan" {
+		if s.plan {
+			return "", errPlan("apply_rename_plan")
+		}
 		s.setStatus("applying rename plan…")
 		if s.lastRenamePlan == nil {
 			return "", fmt.Errorf("no rename_plan has been produced yet")
@@ -642,6 +652,11 @@ func (s *Session) dispatch(ctx context.Context, call provider.ToolCall, tr *trai
 	// External (MCP) tools: gated like bash — the server is outside the
 	// harness's trust boundary.
 	if s.opts.ExtraInvoke != nil && strings.HasPrefix(call.Name, "mcp_") {
+		if s.plan {
+			// An MCP server can mutate anything it fronts — read-only
+			// cannot be guaranteed, so plan mode refuses the class.
+			return "", errPlan("mcp call " + call.Name)
+		}
 		s.setStatus("mcp: %s", call.Name)
 		fmt.Fprintf(s.out, "  %s\n", s.st.cyan("⇄ "+call.Name+" "+compactArgs(call.Args)))
 		if ok, why := s.gate(VerdictAsk, "mcp call: "+call.Name, compactArgs(call.Args)); !ok {
@@ -691,6 +706,7 @@ func (s *Session) runSubagent(ctx context.Context, call provider.ToolCall, tr *t
 		Color:    s.opts.Color,
 		Depth:    s.opts.Depth + 1,
 	})
+	sub.plan = s.plan // a read-only session must not mutate via a subagent
 	reply, err := sub.Ask(ctx, task)
 	in, out := sub.Usage()
 	s.usageIn += in

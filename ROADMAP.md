@@ -16,18 +16,18 @@ compile oracles, quality gates).
 - One-keypress local model onboarding, RAM-filtered catalog
 - Oracle-verified A/B vs Claude Code (publishable evidence)
 
-## P0 — table stakes to compete
-1. MCP client (consume GitHub/DB/Slack MCP servers)
-2. Git checkpointing + /undo per task
-3. OpenAI-compatible base-URL provider (LM Studio, llama.cpp, vLLM, OpenRouter)
-4. Sign in with ChatGPT (Codex OAuth — permitted; Anthropic OAuth is banned, keys only)
-5. Permission policies: per-tool/per-path allowlists in .mason/config
+## P0 — table stakes to compete (✅ all shipped, v0.14–v0.15)
+1. ✅ MCP client (consume GitHub/DB/Slack MCP servers)
+2. ✅ Git checkpointing + /undo per task
+3. ✅ OpenAI-compatible base-URL provider (LM Studio, llama.cpp, vLLM, OpenRouter)
+4. ✅ Sign in with ChatGPT (Codex OAuth — permitted; Anthropic OAuth is banned, keys only)
+5. ✅ Permission policies: per-tool/per-path allowlists in .mason/config
 
 ## P1 — competitive weight
-6. Plan / read-only mode
-7. `mason init` — generate MASON.md from the graph
-8. Session picker (/resume list, named sessions)
-9. Web fetch tool
+6. ✅ Plan / read-only mode (v0.16: --plan / /plan, harness-enforced)
+7. ✅ `mason init` — generate MASON.md from the graph (v0.16)
+8. ✅ Session picker (v0.16: --resume / /sessions / /resume N, named + auto-titled)
+9. ✅ Web fetch tool (v0.16: gated, redacted, private-address guarded)
 10. Non-interactive JSON output for CI/SDK
 11. Cost budgets (--max-cost)
 12. LSP diagnostics feed alongside the graph
