@@ -267,7 +267,9 @@ func (c *Client) respondNull(id json.Number) {
 }
 
 func pathToURI(p string) string {
-	p = filepath.ToSlash(p)
+	// Explicit backslash conversion: filepath.ToSlash is a no-op off
+	// Windows, but URIs need forward slashes regardless of build platform.
+	p = strings.ReplaceAll(p, `\`, "/")
 	if !strings.HasPrefix(p, "/") {
 		p = "/" + p // windows drive paths
 	}
