@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -46,7 +47,8 @@ usage:
   mason version
 
 flags:
-  --model <spec>   ollama:<tag> | claude:<m> | openai:<m> | openrouter:<m> |
+  --model <name>   friendly names: sonnet | haiku | opus | gpt | gpt-mini — or full specs:
+                   ollama:<tag> | claude:<m> | openai:<m> | openrouter:<m> |
                    lmstudio:<m> | vllm:<m> | oai:<url>#<m> | auto  (default: auto-detect)
                    auto = measured tier routing: graph tasks → small local, coding → best local
   --dir <path>     project root (default: current directory)
@@ -181,7 +183,7 @@ func run(args []string) int {
 		switch a := args[i]; a {
 		case "--model":
 			if i+1 < len(args) {
-				model = args[i+1]
+				model = resolveModelAlias(args[i+1])
 				i++
 			}
 		case "--dir":
@@ -640,6 +642,14 @@ func run(args []string) int {
 			SaveSession:   func() { saveSession(sessFile, sess.History(), model, sessName) },
 			ExpandCommand: func(line string) (string, bool) { return expandCommand(root, line) },
 			ExtraHelp:     commandsHelp(root),
+			APIModels:     apiCatalog,
+			HasCred:       creds.Has,
+			StoreCred:     creds.Store,
+			ResolveAlias:  resolveModelAlias,
+			OpenKeyPage: func(vendor string) string {
+				url, _ := creds.OpenKeyPage(vendor)
+				return url
+			},
 		})
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "mason:", err)
@@ -652,6 +662,8 @@ func run(args []string) int {
 
 	// REPL: one conversation, many tasks. liner gives editing, history, and
 	// Ctrl+C-cancels-line without aborting the session.
+	var pickInstalled []string
+	var pickDownload []localmodels.Model
 	fmt.Println(`type a task — /help for commands, /exit to quit`)
 	rl := liner.NewLiner()
 	rl.SetCtrlCAborts(true)
@@ -752,27 +764,53 @@ func run(args []string) int {
 			}
 			continue
 		case line == "/models":
-			spec, err := localmodels.Wizard(true)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "models:", err)
-				continue
-			}
-			if spec != "" {
-				np, err := factory(spec)
-				if err != nil {
-					fmt.Fprintln(os.Stderr, "model:", err)
-					continue
-				}
-				sess.SetProvider(np)
-				model = spec
-				fmt.Println("switched to", np.Name())
-			}
+			var text string
+			text, pickInstalled, pickDownload = renderModelList()
+			fmt.Println("\n" + text)
 			continue
 		case strings.HasPrefix(line, "/model"):
 			spec := strings.TrimSpace(strings.TrimPrefix(line, "/model"))
 			if spec == "" {
-				fmt.Println("current model:", model)
+				fmt.Println("current model:", model, "— /models lists every choice")
 				continue
+			}
+			if n, err := strconv.Atoi(spec); err == nil {
+				if pickInstalled == nil && pickDownload == nil {
+					_, pickInstalled, pickDownload = renderModelList()
+				}
+				apiBase := len(pickInstalled) + len(pickDownload)
+				switch {
+				case n >= 1 && n <= len(pickInstalled):
+					spec = "ollama:" + pickInstalled[n-1]
+				case n > len(pickInstalled) && n <= apiBase:
+					pick := pickDownload[n-1-len(pickInstalled)]
+					fmt.Printf("downloading %s (%.1f GB)…\n", pick.Tag, pick.DownloadGB)
+					dl := exec.Command("ollama", "pull", pick.Tag)
+					dl.Stdout, dl.Stderr = os.Stdout, os.Stderr
+					if err := dl.Run(); err != nil {
+						fmt.Fprintln(os.Stderr, "download failed:", err)
+						continue
+					}
+					spec = "ollama:" + pick.Tag
+				case n > apiBase && n <= apiBase+len(apiCatalog):
+					spec = apiCatalog[n-1-apiBase].Spec
+				default:
+					fmt.Println("no model #" + spec + " — see /models")
+					continue
+				}
+			} else {
+				spec = resolveModelAlias(spec)
+			}
+			// A picked API model without a stored key gets the guided
+			// browser + hidden-paste login before switching.
+			for _, am := range apiCatalog {
+				if am.Spec == spec && !creds.Has(am.Vendor) {
+					fmt.Printf("no %s key yet — let's set one up (stored only in your OS keychain)\n", am.Vendor)
+					if err := creds.Login(am.Vendor); err != nil {
+						fmt.Fprintln(os.Stderr, "login:", err)
+					}
+					break
+				}
 			}
 			np, err := provider.NewProvider(spec, func(vendor string) (string, error) {
 				return creds.Get(vendor, interactive)

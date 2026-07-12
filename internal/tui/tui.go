@@ -14,6 +14,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -46,6 +47,21 @@ type Config struct {
 	// (.mason/commands/<name>.md); ok=false when no such command exists.
 	ExpandCommand func(line string) (task string, ok bool)
 	ExtraHelp     string // appended to /help (e.g. the custom-command list)
+	// Unified model picker: curated API models plus credential plumbing.
+	APIModels    []APIModel
+	HasCred      func(vendor string) bool
+	StoreCred    func(vendor, key string) error
+	ResolveAlias func(spec string) string // "sonnet" → "claude:claude-sonnet-5"
+	// OpenKeyPage opens the vendor's key page in the browser (best-effort)
+	// and returns its URL for display.
+	OpenKeyPage func(vendor string) string
+}
+
+// APIModel is one curated paid-model choice in the picker.
+type APIModel struct {
+	Label  string // human name shown in the list
+	Spec   string // provider spec, e.g. "claude:claude-sonnet-5"
+	Vendor string // credential vendor: "anthropic" | "openai"
 }
 
 // UI owns the event channel shared with the agent goroutine.
@@ -158,10 +174,16 @@ type uiModel struct {
 	autoApprove bool    // blanket approval (/auto, or 'a' at a prompt)
 	redactOff   bool    // /secrets off
 	planOn      bool    // /plan — read-only mode indicator
-	// /models pick lists: 1..len(pickInstalled) switch instantly,
-	// continuing numbers download via ExecProcess.
+	// /models pick lists: 1..len(pickInstalled) switch instantly, the next
+	// numbers download via ExecProcess, the numbers after those are API
+	// models (key entry guided in-TUI when the credential is missing).
 	pickInstalled []string
 	pickDownload  []localmodels.Model
+	pickAPI       []APIModel
+	// awaitKey is non-nil while the input box is collecting an API key
+	// (masked) for the picked model; Esc cancels.
+	awaitKey *APIModel
+	keyIn    textinput.Model
 }
 
 func newModel(u *UI, cfg Config) uiModel {
@@ -264,6 +286,8 @@ func (m *uiModel) statusLine() string {
 	in, out, cost := m.cfg.Usage()
 	state := "ready — waiting for your input"
 	switch {
+	case m.awaitKey != nil:
+		state = "waiting for your API key  (Esc cancels)"
 	case m.perm != nil:
 		state = "waiting for your approval  [y/n]"
 	case m.busy:
@@ -302,6 +326,9 @@ func (m uiModel) View() string {
 	header := headerStyle.Render(fmt.Sprintf(" mason %s ", m.cfg.Version)) +
 		statusStyle.Render("· "+m.cfg.Root)
 	prompt := m.in.View()
+	if m.awaitKey != nil {
+		prompt = permStyle.Render(" "+m.awaitKey.Vendor+" API key: ") + m.keyIn.View()
+	}
 	if m.perm != nil {
 		prompt = permStyle.Render(fmt.Sprintf(" allow? %s  [y/n/a=always]", m.perm.action))
 	}
@@ -397,6 +424,22 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// API-key entry swallows keys until submitted or cancelled.
+		if m.awaitKey != nil {
+			switch msg.String() {
+			case "enter":
+				m.finishKeyEntry()
+				return m, nil
+			case "esc", "ctrl+c":
+				m.awaitKey = nil
+				m.keyIn.Reset()
+				m.append("key entry cancelled\n")
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.keyIn, cmd = m.keyIn.Update(msg)
+			return m, cmd
+		}
 		// Permission prompt swallows keys until answered.
 		if m.perm != nil {
 			switch strings.ToLower(msg.String()) {
@@ -471,6 +514,55 @@ func (m uiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// startKeyEntry switches the input box into masked API-key collection for
+// the picked model: the vendor's key page opens in the browser, the pasted
+// key goes only to the OS keychain, and Esc cancels.
+func (m uiModel) startKeyEntry(pick APIModel) (tea.Model, tea.Cmd) {
+	if m.cfg.StoreCred == nil {
+		m.append(errStyle.Render("key entry unavailable in this build") + "\n")
+		return m, nil
+	}
+	url := ""
+	if m.cfg.OpenKeyPage != nil {
+		url = m.cfg.OpenKeyPage(pick.Vendor)
+	}
+	p := pick
+	m.awaitKey = &p
+	ki := textinput.New()
+	ki.EchoMode = textinput.EchoPassword
+	ki.EchoCharacter = '•'
+	ki.Placeholder = "paste your " + pick.Vendor + " API key"
+	ki.Focus()
+	m.keyIn = ki
+	m.append("\n" + permStyle.Render("→ "+pick.Label) + "\n" +
+		"  1. Your browser is opening " + url + " (sign in, create a key, copy it)\n" +
+		"  2. Paste the key below — it is hidden and stored ONLY in your OS keychain\n" +
+		"  Esc cancels.\n")
+	return m, textinput.Blink
+}
+
+// finishKeyEntry stores the collected key and switches to the model.
+func (m *uiModel) finishKeyEntry() {
+	pick := *m.awaitKey
+	key := strings.TrimSpace(m.keyIn.Value())
+	m.awaitKey = nil
+	m.keyIn.Reset()
+	if key == "" {
+		m.append(errStyle.Render("empty key — nothing stored") + "\n")
+		return
+	}
+	if err := m.cfg.StoreCred(pick.Vendor, key); err != nil {
+		m.append(errStyle.Render("keychain: "+err.Error()) + "\n")
+		return
+	}
+	if err := m.cfg.SwitchModel(pick.Spec); err != nil {
+		m.append(errStyle.Render("model: "+err.Error()) + "\n")
+		return
+	}
+	m.model = pick.Spec
+	m.append("✓ key stored in the OS keychain · switched to " + pick.Label + "\n")
+}
+
 // command handles slash commands inside the TUI.
 func (m uiModel) command(line string) (tea.Model, tea.Cmd) {
 	fields := strings.Fields(line)
@@ -483,9 +575,9 @@ func (m uiModel) command(line string) (tea.Model, tea.Cmd) {
 	case "/help":
 		m.append(`
 commands:
-  /models        list local models — pick by number with /model N
-  /model N       switch to installed model number N (from /models)
-  /model <spec>  switch to any model, e.g. claude:claude-sonnet-5
+  /models        list ALL models — free local, downloadable, and API — pick with /model N
+  /model N       switch to model number N (API picks guide you through the key once)
+  /model <name>  switch by name: sonnet · haiku · opus · gpt · gpt-mini · any full spec
   /cost          session token usage and cost
   /savings       graph-read token ledger
   /compact       summarize old history
@@ -697,19 +789,32 @@ keys: mouse wheel or PgUp/PgDn scroll (Shift+drag to select text) · Ctrl+C canc
 		ram := localmodels.SystemRAMGB()
 		m.pickInstalled = st.Installed
 		m.pickDownload = nil
+		m.pickAPI = m.cfg.APIModels
 		installed := st.InstalledSet()
 		var b strings.Builder
-		b.WriteString("\ninstalled — /model N switches:\n")
+		b.WriteString("\nfree local — installed, /model N switches:\n")
 		for i, t := range st.Installed {
 			fmt.Fprintf(&b, "  %d. %s\n", i+1, t)
 		}
-		b.WriteString("downloadable — /model N downloads then switches:\n")
+		b.WriteString("free local — /model N downloads then switches:\n")
 		n := len(st.Installed)
 		for _, c := range localmodels.Catalog {
 			if !installed[c.Tag] && c.Fits(ram) {
 				n++
 				m.pickDownload = append(m.pickDownload, c)
 				fmt.Fprintf(&b, "  %d. %-22s %.1f GB · needs %d GB — %s\n", n, c.Tag, c.DownloadGB, c.MinRAMGB, c.Note)
+			}
+		}
+		n = len(st.Installed) + len(m.pickDownload)
+		if len(m.pickAPI) > 0 {
+			b.WriteString("API — /model N switches (mason guides you through the key on first use):\n")
+			for _, am := range m.pickAPI {
+				n++
+				status := "needs API key — mason will walk you through it"
+				if m.cfg.HasCred != nil && m.cfg.HasCred(am.Vendor) {
+					status = "✓ key in keychain"
+				}
+				fmt.Fprintf(&b, "  %d. %-36s %s\n", n, am.Label, status)
 			}
 		}
 		m.append(b.String())
@@ -721,14 +826,16 @@ keys: mouse wheel or PgUp/PgDn scroll (Shift+drag to select text) · Ctrl+C canc
 		}
 		spec := fields[1]
 		if n, err := strconv.Atoi(spec); err == nil {
-			if len(m.pickInstalled) == 0 && len(m.pickDownload) == 0 {
+			if len(m.pickInstalled) == 0 && len(m.pickDownload) == 0 && len(m.pickAPI) == 0 {
 				st := localmodels.Detect()
 				m.pickInstalled = st.Installed
+				m.pickAPI = m.cfg.APIModels
 			}
+			apiBase := len(m.pickInstalled) + len(m.pickDownload)
 			switch {
 			case n >= 1 && n <= len(m.pickInstalled):
 				spec = "ollama:" + m.pickInstalled[n-1]
-			case n > len(m.pickInstalled) && n <= len(m.pickInstalled)+len(m.pickDownload):
+			case n > len(m.pickInstalled) && n <= apiBase:
 				pick := m.pickDownload[n-1-len(m.pickInstalled)]
 				m.append(fmt.Sprintf("downloading %s (%.1f GB) — the screen hands over to ollama…\n", pick.Tag, pick.DownloadGB))
 				// Suspend the TUI, run ollama pull with its own progress
@@ -737,9 +844,28 @@ keys: mouse wheel or PgUp/PgDn scroll (Shift+drag to select text) · Ctrl+C canc
 				return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
 					return pullDoneMsg{tag: pick.Tag, err: err}
 				})
+			case n > apiBase && n <= apiBase+len(m.pickAPI):
+				pick := m.pickAPI[n-1-apiBase]
+				if m.cfg.HasCred != nil && m.cfg.HasCred(pick.Vendor) {
+					spec = pick.Spec
+					break
+				}
+				return m.startKeyEntry(pick)
 			default:
 				m.append(errStyle.Render("no model #"+fields[1]+" — see /models") + "\n")
 				return m, nil
+			}
+		} else {
+			if m.cfg.ResolveAlias != nil {
+				spec = m.cfg.ResolveAlias(spec)
+			}
+			// A typed API model without a stored key routes through the
+			// same guided key entry as a numbered pick — a stdin prompt
+			// under a running TUI would corrupt the screen.
+			for _, am := range m.cfg.APIModels {
+				if am.Spec == spec && m.cfg.HasCred != nil && !m.cfg.HasCred(am.Vendor) {
+					return m.startKeyEntry(am)
+				}
 			}
 		}
 		if err := m.cfg.SwitchModel(spec); err != nil {

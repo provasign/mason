@@ -96,6 +96,19 @@ var keyPage = map[string]string{
 	"openrouter": "https://openrouter.ai/keys",
 }
 
+// KeyPageURL returns the vendor's API-key page ("" for unknown vendors).
+func KeyPageURL(vendor string) string { return keyPage[vendor] }
+
+// OpenKeyPage opens the vendor's API-key page in the default browser,
+// best-effort; returns the URL either way so callers can show it.
+func OpenKeyPage(vendor string) (url string, opened bool) {
+	url = keyPage[vendor]
+	if url == "" {
+		return "", false
+	}
+	return url, openBrowser(url)
+}
+
 // openBrowser opens url in the default browser, best-effort.
 func openBrowser(url string) bool {
 	var cmd *exec.Cmd

@@ -53,8 +53,8 @@ mason --continue "follow-up…"  # resume this repo's latest conversation
 mason --resume                 # pick any saved conversation (list + prompt)
 mason --plan "how would we…"   # plan mode: read-only, mutations refused by the harness
 mason init                     # generate MASON.md (project map) from the tree + code graph
-mason --model ollama:qwen3-coder:30b "task…"
-mason --model claude:claude-haiku-4-5-20251001 "task…"
+mason --model sonnet "task…"   # friendly names: sonnet · haiku · opus · gpt · gpt-mini
+mason --model ollama:qwen3-coder:30b "task…"           # full specs still work
 mason --model openrouter:qwen/qwen3-coder "task…"      # OpenRouter
 mason --model lmstudio:qwen2.5-coder-32b "task…"       # LM Studio local server
 mason --model oai:http://localhost:8000#my-model "task…" # any OpenAI-compatible server
@@ -154,6 +154,16 @@ the provasign study.
 
 Model auto-detection: best installed local model first (catalog order),
 then any installed local model, then Anthropic, then OpenAI.
+
+**Nobody types model IDs.** `/models` shows ONE numbered list — installed
+local models, downloadable local models, and a curated API shortlist
+(Claude Sonnet/Haiku/Opus, GPT-4.1/-mini) — and `/model N` switches.
+Friendly names work everywhere a spec does: `--model sonnet`,
+`/model haiku`. Picking an API model without a stored key starts a guided
+setup right there: the vendor's key page opens in your browser, you paste
+the key (input hidden — in the TUI it's collected masked in the input box),
+and it lands only in the OS keychain (macOS Keychain / Windows Credential
+Manager / Linux Secret Service). Next time it just switches.
 
 Works on an existing repo or an **empty directory** — "start a brand new Go
 project with a module, a package, and tests" scaffolds, builds, and tests a
