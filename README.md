@@ -178,10 +178,10 @@ first, then sonnet/haiku/opus/fable/gpt aliases, then the rest) narrow as
 you type — `/model hai` → Tab → `/model haiku` → Enter. The line-mode
 REPL gets both stages via Tab-completion.
 
-**Native text selection.** The TUI captures the mouse for wheel-scrolling,
-which normally means you need Shift+drag to select text. `/mouse off`
-releases mouse capture — drag-select works exactly like a normal terminal
-(PgUp/PgDn still scroll); `/mouse on` (or `/mouse`) re-enables the wheel.
+**Native text selection.** Mouse capture is **off by default**, so
+drag-select and copy work exactly like a normal terminal (PgUp/PgDn
+scroll). `/mouse` enables mouse-wheel scrolling when you want it;
+`/mouse off` returns to native selection.
 
 Works on an existing repo or an **empty directory** — "start a brand new Go
 project with a module, a package, and tests" scaffolds, builds, and tests a
@@ -231,8 +231,12 @@ half the parent's turn budget, optional cheaper model
 
 | Task shape | Tier that suffices |
 |---|---|
-| Renames, signature changes, callers, missing impls, test gaps, dead code | **local 14B** — measured at the engine ceiling |
+| Renames, signature changes, callers, missing impls, test gaps, dead code | **local model** — measured at the engine ceiling (recall 1.00 with qwen3-coder:30b across 4 languages; renames verified E2E on a 14B) |
 | General editing/bugfixing | local 30B or a small API tier (haiku) |
+
+Numbers and methodology: [github.com/provasign/research](https://github.com/provasign/research)
+(`RESULTS.md` — the with/without-graph agent grid, the tier-invariance
+result, and the named-tool comparison).
 
 ## Production behavior
 
@@ -245,6 +249,11 @@ half the parent's turn budget, optional cheaper model
   `MASON_BASH_TIMEOUT` seconds to change).
 - **Path confinement**: model-supplied paths for read/edit/write/grep/list
   cannot escape the project root.
+- **Secret redaction (default on)**: every tool result (file reads, grep
+  hits, bash output, web fetches) is scanned before it reaches the model;
+  detected credentials become `[REDACTED:kind]` and the notice itemizes by
+  kind — `6×credential` reads as test fixtures, `1×anthropic-key` as a real
+  leak. `/secrets off` disables (loudly).
 - **Engine-optional**: if the code graph cannot open, mason warns and runs
   with the coding tools — it never bricks.
 - **Turn limit** ends in a forced wrap-up summary flagged for verification,

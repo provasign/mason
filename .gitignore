@@ -3,3 +3,18 @@ dist/
 .grove/
 .claude/settings.local.json
 .shale/
+
+# prism-generated agent steering (regenerates via `prism init`; mason itself is harness-first)
+.clinerules
+.cursorrules
+.devin/
+.kiro/
+.windsurfrules
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+prism.yaml
+.github/copilot-instructions.md
+.mcp.json
+.vscode/
+.windsurf/
