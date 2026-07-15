@@ -32,6 +32,13 @@ through grep. mason makes both structurally impossible:
 - **Graph-aware reads** — `read_file` is prism's session-compressed read: a
   repeat read of an unchanged file costs a ~10-token pointer instead of the
   body. Savings are ledgered and shown after each session.
+- **Edit-ready context** — for a change or a bug fix, `code_context` returns
+  prism's source delivery: the relevant code as verbatim, line-numbered
+  windows plus each anchor's callers and covering tests, in one call. The
+  harness picks that delivery from the *task's* intent, not the model's
+  phrasing, and the model is told those windows are reads it already holds —
+  so it edits instead of re-reading. This extends mason past change-impact to
+  localized bug fixes.
 - **Honesty guard** — if a task asked for a change and the working tree is
   untouched when the model claims success, the claim is rejected once and
   any remaining fabrication is flagged to you, never silently accepted.
