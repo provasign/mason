@@ -43,6 +43,69 @@ func TestCodeContextDeliversContent(t *testing.T) {
 	}
 }
 
+func TestCodeContextPassesThroughSourceDelivery(t *testing.T) {
+	// prism v0.25 source delivery: the response is one pre-rendered content
+	// string (line-numbered windows + anchor summary), not a symbols list.
+	// It must reach the model verbatim, not fall into the "(no context)" path.
+	rendered := "**Anchors — callers and covering tests (verify before editing)**\n\n" +
+		"- `Retry` (fetch.go:10) — 3 callers in `main.go`; tests: `fetch_test.go`\n\n" +
+		"**`fetch.go`**\n\n```go\n10\tfunc Retry() {\n11\t\t…\n12\t}\n```\n"
+	invoke := func(tool string, args map[string]any) (any, error) {
+		return map[string]any{
+			"content":         rendered,
+			"delivery":        "source",
+			"files":           []any{"fetch.go"},
+			"deliveredTokens": 60,
+		}, nil
+	}
+	s := New(nil, invoke, Options{Root: t.TempDir(), Out: io.Discard})
+	out, err := s.runCodingTool(context.Background(), provider.ToolCall{Name: "code_context",
+		Args: map[string]any{"task": "fix the retry bug", "terms": []any{"Retry"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Anchors", "10\tfunc Retry() {", "3 callers"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "(no context") {
+		t.Errorf("source delivery fell into the no-context path:\n%s", out)
+	}
+}
+
+func TestCodeContextForcesSourceDeliveryOnMutationTask(t *testing.T) {
+	// The model phrases context calls as "analyze/understand X" even mid-fix,
+	// which phase-detects as explore. The USER task decides delivery: a
+	// mutation task forces delivery=source; a read-only task leaves it to
+	// prism's phase detection.
+	var got map[string]any
+	invoke := func(tool string, args map[string]any) (any, error) {
+		got = args
+		return map[string]any{"content": "**Source**\n1\tx\n", "delivery": "source"}, nil
+	}
+	s := New(nil, invoke, Options{Root: t.TempDir(), Out: io.Discard})
+
+	s.curTask = "fix the retry bug in the fetcher"
+	if _, err := s.runCodingTool(context.Background(), provider.ToolCall{Name: "code_context",
+		Args: map[string]any{"task": "analyze the retry logic", "terms": []any{"Retry"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if got["delivery"] != "source" {
+		t.Errorf("mutation task should force delivery=source, got %v", got["delivery"])
+	}
+
+	s.curTask = "explain how the retry logic works"
+	got = nil
+	if _, err := s.runCodingTool(context.Background(), provider.ToolCall{Name: "code_context",
+		Args: map[string]any{"task": "analyze the retry logic", "terms": []any{"Retry"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := got["delivery"]; present {
+		t.Errorf("read-only task must not force delivery, got %v", got["delivery"])
+	}
+}
+
 func TestCodingToolsOnlyStripsGraphTools(t *testing.T) {
 	kept := map[string]bool{}
 	for _, tl := range codingToolsOnly(toolDefs()) {

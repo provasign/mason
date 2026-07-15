@@ -92,8 +92,8 @@ github.com/provasign/astkit v0.4.20 h1:DbYNtDWksmBjCPm4JJZCTANMsz5fNniqXET3KR5zy
 github.com/provasign/astkit v0.4.20/go.mod h1:uSQxIxw3dVpK/6KmHvqIE8+DK/nhxDuPklKv7g96Jr4=
 github.com/provasign/grove v0.20.0 h1:J09gpRuduMPDFG21on+/NhAjYrROpV70sYYiKiX5/SM=
 github.com/provasign/grove v0.20.0/go.mod h1:3qOvMxwgKq2BTVv3rrg/A0YhWZ6rcW8vKKPhjByH1qU=
-github.com/provasign/prism v0.24.0 h1:ChtJjgzLidwAleQ7SyXAy66ORcxMeyFx3Q3qiAlHAMs=
-github.com/provasign/prism v0.24.0/go.mod h1:Jjj6w5UV8OoQZ23IWKLyNYl/QCYiF8+UzWyFxBMeoSw=
+github.com/provasign/prism v0.25.0 h1:CWP0WrMIGk0JTOTVEWr1DOTY+sE3vxVnpesDZpsH9u4=
+github.com/provasign/prism v0.25.0/go.mod h1:Jjj6w5UV8OoQZ23IWKLyNYl/QCYiF8+UzWyFxBMeoSw=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec/go.mod h1:qqbHyh8v60DhA7CoWK5oRCqLrMHRGoxYCSS9EjAz6Eo=
 github.com/rivo/uniseg v0.1.0/go.mod h1:J6wj4VEh+S6ZtnVlnTBMWIodfgj8LQOQFoIToxlJtxc=

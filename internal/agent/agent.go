@@ -39,6 +39,12 @@ search on exactly these shapes):
   a chain of read_file/grep round-trips. EXCEPTION: renames, signature
   changes, and deprecations — rename_plan / change_impact are already the
   complete answer; calling code_context for those wastes turns.
+- For bug fixes, code_context returns verbatim LINE-NUMBERED source blocks
+  (same format as read_file) plus each anchor's callers and covering tests.
+  Those blocks ARE reads you already performed: do not read_file the same
+  files again — edit directly. The anchor lines tell you the blast radius;
+  prefer fixing at the anchor the failing behavior names, not a deeper
+  helper that merely looks related.
 - A rename is a THREE-CALL procedure: rename_plan → apply_rename_plan →
   verify with bash. Nothing else. No reading files, no checking the plan.
 - Graph results render to the user directly; you receive only counts and
@@ -49,6 +55,16 @@ search on exactly these shapes):
 Working style:
 - Look before you leap: read the relevant code before editing.
 - After code changes, verify with the project's build or tests via bash.
+- Verify from the repository root with THIS repository's code on the import
+  path (when unsure, print the module's __file__ and confirm it points into
+  this repo). NEVER verify from another directory — you will import an
+  installed copy and a correct fix will look broken.
+- Verify the REPORTED failing case and the project's own tests. If a case
+  you invented yourself fails while the reported case and the tests pass,
+  the fix is done — do not expand it; mention the extra case in your
+  summary instead.
+- Delete any scratch files you created (test scripts, probes) before
+  summarizing; they are not part of the change.
 - Files change ONLY through edit_file, write_file, apply_rename_plan, or a
   bash command. Never claim a change you did not make with a tool call.
 - NEVER ask the user for information you can obtain yourself: the repository
@@ -144,6 +160,7 @@ type Session struct {
 	renamePlanPending   bool // plan produced, not yet applied at all
 	renameAmbiguousLeft int  // ambiguous edits not yet applied
 	checkpoints    []string // snapshot commits, newest last (/undo)
+	curTask        string   // the user task being served; steers code_context delivery
 	pendingNote    string   // folded into the next task message (e.g. undo notice)
 	pendingImages     []provider.Image // queued by --image for the next task
 	pendingImageNames []string
@@ -407,6 +424,7 @@ func (s *Session) renderFinal(text string) string {
 // returns the model's final text reply. Cancelling ctx stops cleanly after
 // the in-flight step: the conversation stays consistent for the next Ask.
 func (s *Session) Ask(ctx context.Context, task string) (string, error) {
+	s.curTask = task
 	if !s.plan {
 		s.checkpoint() // nothing to undo in a read-only task
 	}

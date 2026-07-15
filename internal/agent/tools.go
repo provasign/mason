@@ -50,7 +50,7 @@ func toolDefs() []provider.ToolDef {
 			Parameters: obj(map[string]any{})},
 
 		// --- coding tools (content delivered to the model) ---
-		{Name: "code_context", Description: "One-call task context from the code graph: the symbols matching your terms PLUS their callers, callees, and tests, compressed to fit. Use this FIRST when starting a task that spans files — it replaces a chain of read_file/grep round-trips. Do NOT use it for renames, signature changes, or deprecations: rename_plan and change_impact already return the COMPLETE set for those.",
+		{Name: "code_context", Description: "One-call task context from the code graph: the symbols matching your terms PLUS their callers, callees, and tests, compressed to fit. For bug-fix and implement tasks the result is verbatim LINE-NUMBERED source (identical to read_file output) plus each anchor's callers and covering tests — treat those blocks as reads you already performed: do NOT read_file the same files again; go straight to the edit. Use this FIRST when starting a task that spans files — it replaces a chain of read_file/grep round-trips. Do NOT use it for renames, signature changes, or deprecations: rename_plan and change_impact already return the COMPLETE set for those.",
 			Parameters: obj(map[string]any{
 				"task":  str("what you are trying to do"),
 				"terms": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "symbol or keyword anchors, e.g. [\"SaveSession\"]"}}, "task", "terms")},
@@ -183,14 +183,18 @@ func diffSnippet(oldText, newText string) string {
 }
 
 // formatCodeContext renders a prism_query result (typed struct or map —
-// normalized through JSON) as direct model food: one header line per symbol
-// with its compressed content under it, grouped in ranking order.
+// normalized through JSON) as direct model food. Two shapes exist since
+// prism v0.25: source delivery (bug-fix/implement tasks — one rendered
+// "content" string of verbatim line-numbered windows + anchor summary,
+// already model-ready) and the classic symbols list (one header line per
+// symbol with its compressed content under it, grouped in ranking order).
 func formatCodeContext(res any) string {
 	b, err := json.Marshal(res)
 	if err != nil {
 		return "(no context)"
 	}
 	var qr struct {
+		Content string `json:"content"` // source delivery: pre-rendered
 		Symbols []struct {
 			QualifiedName string `json:"qualifiedName"`
 			Name          string `json:"name"`
@@ -199,6 +203,9 @@ func formatCodeContext(res any) string {
 			Content       string `json:"content"`
 		} `json:"symbols"`
 		Note string `json:"note"`
+	}
+	if json.Unmarshal(b, &qr) == nil && qr.Content != "" {
+		return truncate(strings.TrimRight(qr.Content, "\n"), maxToolOutput)
 	}
 	if json.Unmarshal(b, &qr) != nil || len(qr.Symbols) == 0 {
 		if qr.Note != "" {
@@ -312,9 +319,18 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 		if len(terms) == 0 {
 			return "", fmt.Errorf("code_context needs at least one term")
 		}
-		res, err := s.invoke("prism_query", map[string]any{
+		qargs := map[string]any{
 			"task": task, "terms": terms, "include": []string{"graph", "tests"},
-		})
+		}
+		// Delivery is decided by the USER's task, not the model's sub-phrasing:
+		// models phrase context calls as "analyze/understand X" even mid-fix,
+		// which reads as explore-phase and yields the compact symbols list.
+		// A mutation task wants the edit-ready source windows (measured: the
+		// 30B re-read files the symbols delivery had already covered).
+		if mutationIntent.MatchString(s.curTask) {
+			qargs["delivery"] = "source"
+		}
+		res, err := s.invoke("prism_query", qargs)
 		if err != nil {
 			return "", err
 		}
