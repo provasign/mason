@@ -280,6 +280,19 @@ mason login anthropic    # store a key in the OS keychain
 mason logout anthropic   # remove it
 ```
 
+## Testing
+
+Run before committing or releasing:
+
+- `go test ./...` — unit suite; must be green (CI runs it on push).
+- Agent-level benchmarks (the four-tier model x arm grid, the e2e bug-fix set)
+  are LLM-in-the-loop, noisy, and expensive, so they are **not** a CI gate. If
+  you change agent steering or context delivery, re-run the relevant harness in
+  [provasign/research](https://github.com/provasign/research)
+  (`harness/bench_matrix.py` or `harness/run_e2e.py`) with **multiple trials**
+  and eyeball for regressions — never trust a single trial (measured:
+  single-trial e2e reads are coin-flips). Do not tag a release with unit tests red.
+
 ## License
 
 Apache-2.0
