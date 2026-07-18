@@ -63,6 +63,11 @@ Working style:
   you invented yourself fails while the reported case and the tests pass,
   the fix is done — do not expand it; mention the extra case in your
   summary instead.
+- If the tests STILL fail after your edit, do not just keep tweaking the same
+  lines — grep the surrounding code and read the failing test to check whether
+  the correct fix is WIDER than the spot you changed (a shared format, protocol,
+  or contract used elsewhere). The focused context you were given is the anchor,
+  not always the whole fix. Widen, then fix.
 - Delete any scratch files you created (test scripts, probes) before
   summarizing; they are not part of the change.
 - Files change ONLY through edit_file, write_file, apply_rename_plan, or a
