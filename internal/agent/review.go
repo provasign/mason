@@ -153,8 +153,11 @@ func (s *Session) Review(base string) (*ReviewReport, error) {
 	if len(perFile) == 0 {
 		return &ReviewReport{Base: resolved}, nil
 	}
-	// The graph must reflect the current tree.
-	_, _ = s.invoke("prism_index", map[string]any{})
+	// The graph must reflect the current tree. Continuing after a failed reindex
+	// would make every downstream completeness claim unreliable.
+	if _, err := s.invoke("prism_index", map[string]any{}); err != nil {
+		return nil, fmt.Errorf("refresh code graph: %w", err)
+	}
 
 	rep := &ReviewReport{Base: resolved}
 	var changed []string
@@ -171,7 +174,6 @@ func (s *Session) Review(base string) (*ReviewReport, error) {
 	}
 
 	// 2) Per touched symbol: blast radius + coverage.
-	checked := 0
 	for _, f := range changed {
 		if !isSourceFile(f) || testFileRe.MatchString(f) {
 			continue
@@ -190,12 +192,6 @@ func (s *Session) Review(base string) (*ReviewReport, error) {
 			touched = symbolsTouched(syms, perFile[f])
 		}
 		for _, sym := range touched {
-			if checked >= 20 {
-				rep.Findings = append(rep.Findings, ReviewFinding{Severity: "info",
-					Text: "review capped at 20 symbols — run again on a smaller diff for full depth"})
-				break
-			}
-			checked++
 			q := sym.QualifiedName
 			if q == "" {
 				q = sym.Name
@@ -215,29 +211,40 @@ func (s *Session) Review(base string) (*ReviewReport, error) {
 							Text: fmt.Sprintf("%s has %d callers — verify each still holds after this change", q, callers)})
 					}
 				}
-			}
-			// Coverage: engine first, deterministic test-reference fallback.
-			s.setStatus("review: coverage %s", q)
-			covered := false
-			if res, err := s.invoke("prism_untested_surface", map[string]any{"query": q}); err == nil {
-				if full, _ := res.(map[string]any); full != nil {
-					covered = len(asSlice(full["covered"])) > 0
-					if !covered && len(asSlice(full["untested"])) == 0 {
-						covered = true // engine could not classify — do not accuse
-					}
-				}
 			} else {
-				covered = !s.noTestReferences(sym.Name)
-			}
-			if !covered {
 				rep.Findings = append(rep.Findings, ReviewFinding{Severity: "warn",
 					File: f, Line: sym.Line,
-					Text: sym.Name + " changed in this diff and no test covers it"})
+					Text: fmt.Sprintf("%s impact could not be verified: %v", q, err)})
+			}
+			// Coverage is authoritative only when the engine classifies the symbol.
+			s.setStatus("review: coverage %s", q)
+			res, err := s.invoke("prism_untested_surface", map[string]any{"query": q})
+			if err != nil {
+				rep.Findings = append(rep.Findings, ReviewFinding{Severity: "warn",
+					File: f, Line: sym.Line,
+					Text: fmt.Sprintf("%s coverage could not be verified: %v", q, err)})
+				continue
+			}
+			full, _ := res.(map[string]any)
+			if full == nil {
+				rep.Findings = append(rep.Findings, ReviewFinding{Severity: "warn",
+					File: f, Line: sym.Line,
+					Text: q + " coverage could not be classified by the engine"})
+				continue
+			}
+			if len(asSlice(full["covered"])) == 0 {
+				text := sym.Name + " changed in this diff and no test covers it"
+				if len(asSlice(full["untested"])) == 0 {
+					text = q + " coverage could not be classified by the engine"
+				}
+				rep.Findings = append(rep.Findings, ReviewFinding{Severity: "warn",
+					File: f, Line: sym.Line, Text: text})
 			}
 		}
 	}
 
-	// 3) Newly unreachable code in the changed files.
+	// 3) Current unreachable code in the changed files. This is diagnostic only:
+	// proving a regression requires a separate graph snapshot for the base tree.
 	changedSet := map[string]bool{}
 	for _, f := range changed {
 		changedSet[f] = true
@@ -257,10 +264,13 @@ func (s *Session) Review(base string) (*ReviewReport, error) {
 				if name == "" {
 					name, _ = dm["name"].(string)
 				}
-				rep.Findings = append(rep.Findings, ReviewFinding{Severity: "warn",
-					File: fp, Text: name + " is unreachable from any entry point"})
+				rep.Findings = append(rep.Findings, ReviewFinding{Severity: "info",
+					File: fp, Text: name + " is currently unreachable; no base-graph comparison was performed"})
 			}
 		}
+	} else {
+		rep.Findings = append(rep.Findings, ReviewFinding{Severity: "warn",
+			Text: fmt.Sprintf("dead-code check could not be completed: %v", err)})
 	}
 	return rep, nil
 }
@@ -274,14 +284,14 @@ func (rep *ReviewReport) Render(w func(string)) int {
 		return 0
 	}
 	if len(rep.Impact) > 0 {
-		w("blast radius (type-resolved, closed sets):")
+		w("blast radius (engine-reported completeness per symbol):")
 		for _, l := range rep.Impact {
 			w("  " + l)
 		}
 	}
 	warns := 0
 	if len(rep.Findings) == 0 {
-		w("✓ no findings — coverage present, no stubs, no placeholder tests, nothing unreachable")
+		w("no findings in the completed checks")
 		return 0
 	}
 	w("findings:")

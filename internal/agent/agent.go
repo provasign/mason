@@ -1,5 +1,5 @@
 // Package agent is mason's core loop: a multi-turn coding agent whose graph
-// operations (prism/grove) and evidence trail (shale) are baked in
+// operations (prism/grove) are baked in; the optional evidence trail uses shale
 // structurally rather than requested by steering files. Graph-op payloads
 // render to the user and never enter the model's context; rename edits are
 // applied by the harness, not the model; graph-shaped tasks are walled onto

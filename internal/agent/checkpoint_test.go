@@ -55,3 +55,11 @@ func TestUndoOutsideGit(t *testing.T) {
 		t.Fatal("undo outside git must error, not corrupt")
 	}
 }
+
+func TestCheckpointRefusesSensitiveUntrackedFiles(t *testing.T) {
+	dir := gitRepo(t)
+	os.WriteFile(filepath.Join(dir, ".env"), []byte("TOKEN=secret\n"), 0o600)
+	if got := snapshotTree(dir); got != "" {
+		t.Fatalf("checkpoint captured a sensitive path: %s", got)
+	}
+}

@@ -36,6 +36,14 @@ func snapshotTree(root string) string {
 		out, err := cmd.Output()
 		return strings.TrimSpace(string(out)), err
 	}
+	// A checkpoint is an unreachable Git commit and therefore persists until
+	// object pruning. Refuse it entirely when an untracked credential-bearing
+	// path would be captured by `git add -A`; a partial snapshot would make
+	// undo destructive for the excluded file. (checkpoint() warns the user;
+	// this guard also protects any direct caller.)
+	if len(sensitiveCheckpointPaths(root)) > 0 {
+		return ""
+	}
 	// Seed the temp index from HEAD when it exists so deletions are captured.
 	if _, err := run("rev-parse", "HEAD"); err == nil {
 		if _, err := run("read-tree", "HEAD"); err != nil {
@@ -62,6 +70,48 @@ func snapshotTree(root string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// sensitiveCheckpointPaths returns untracked, non-ignored credential-bearing
+// files that a checkpoint's `git add -A` would otherwise write into a Git
+// object. Non-empty means the checkpoint must be refused. Tracked files are
+// already in history, so only untracked paths are a new exposure.
+func sensitiveCheckpointPaths(root string) []string {
+	cmd := exec.Command("git", "-C", root, "ls-files", "-o", "--exclude-standard")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	var hits []string
+	for _, path := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if checkpointSensitivePath(path) {
+			hits = append(hits, path)
+		}
+	}
+	return hits
+}
+
+func checkpointSensitivePath(path string) bool {
+	path = filepath.ToSlash(strings.TrimSpace(path))
+	if path == "" {
+		return false
+	}
+	for _, part := range strings.Split(path, "/") {
+		switch strings.ToLower(part) {
+		case ".ssh", ".aws", ".gnupg", ".kube":
+			return true
+		}
+	}
+	base := strings.ToLower(filepath.Base(path))
+	if base == ".env" || strings.HasPrefix(base, ".env.") ||
+		base == "credentials.json" || strings.HasPrefix(base, "secrets.") {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(base)) {
+	case ".key", ".pem", ".p12", ".pfx", ".jks", ".keystore", ".pkcs12":
+		return true
+	}
+	return false
 }
 
 // restoreSnapshot returns the working tree to the snapshot state: files in
@@ -119,6 +169,12 @@ func restoreSnapshot(root, snap string) error {
 
 // checkpoint records a snapshot at task start (kept on a small stack).
 func (s *Session) checkpoint() {
+	if hits := sensitiveCheckpointPaths(s.root); len(hits) > 0 {
+		fmt.Fprintf(s.out, "  %s\n", s.st.dim(fmt.Sprintf(
+			"checkpoint skipped — %s could expose credentials; /undo is unavailable for this task",
+			hits[0])))
+		return
+	}
 	snap := snapshotTree(s.root)
 	if snap == "" {
 		return

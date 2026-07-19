@@ -1,5 +1,5 @@
 // mason — a model-agnostic coding agent with the prism/grove code graph and
-// shale evidence trail baked in. No steering files: tool routing, payload
+// optional shale evidence trail when the binary is installed. No steering files: tool routing, payload
 // relay, and edit application are properties of the harness.
 package main
 
@@ -71,6 +71,7 @@ usage:
   mason sessions                list saved conversations for this directory
   mason models                  browse, download, and pick free local models
   mason login <anthropic|openai>    store an API key in the OS keychain
+  mason login chatgpt               experimental PKCE login; provider requires MASON_CHATGPT_BASE
   mason logout <anthropic|openai>   remove a stored API key
   mason version
 
@@ -78,7 +79,8 @@ flags:
   --model <name>   friendly names: sonnet | haiku | opus | gpt | gpt-mini — or full specs:
                    ollama:<tag> | claude:<m> | openai:<m> | openrouter:<m> |
                    lmstudio:<m> | vllm:<m> | oai:<url>#<m> | auto  (default: auto-detect)
-                   auto = measured tier routing: graph tasks → small local, coding → best local
+                   explicit auto = measured local routing: graph tasks → small, coding → best
+                   omitted --model = select one available model; no per-task routing
   --dir <path>     project root (default: current directory)
   --continue       resume the latest conversation for this directory
   --resume [n]     pick a saved conversation to resume (list + prompt, or directly by number)

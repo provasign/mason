@@ -1,10 +1,12 @@
 # mason
 
-A coding agent that works with **any model** — local (Ollama), Anthropic, or
-OpenAI — with the [prism](https://github.com/provasign/prism)/grove code graph
-and the shale evidence trail **baked in**. No steering files: the behaviors
-that make agents accurate and cheap are properties of the harness, not
-requests to the model.
+The incubating reference coding agent for
+[Prism](https://github.com/provasign/prism) and
+[Shale](https://github.com/provasign/shale). Mason works with **any model** —
+local (Ollama), Anthropic, or OpenAI — with Prism change intelligence built
+into the harness and Shale evidence recorded when available. No steering
+files: the behaviors that make agents accurate and cheap are properties of
+the harness, not requests to the model.
 
 ```
 mason "Rename the Status method of the ResponseWriter interface to StatusCode.
@@ -62,6 +64,7 @@ mason --plan "how would we…"   # plan mode: read-only, mutations refused by th
 mason init                     # generate MASON.md (project map) from the tree + code graph
 mason --model sonnet "task…"   # friendly names: sonnet · haiku · opus · gpt · gpt-mini
 mason --model ollama:qwen3-coder:30b "task…"           # full specs still work
+mason --model auto "task…"             # explicit two-tier local routing by task shape
 mason --model openrouter:qwen/qwen3-coder "task…"      # OpenRouter
 mason --model lmstudio:qwen2.5-coder-32b "task…"       # LM Studio local server
 mason --model oai:http://localhost:8000#my-model "task…" # any OpenAI-compatible server
@@ -78,7 +81,11 @@ already paid for is still delivered; pending tool work is not started.
 
 Per-task **checkpointing**: every task snapshots the tree first (tracked +
 untracked, via unreferenced git objects — your HEAD/index never move);
-`/undo` reverts the last task's file changes.
+`/undo` reverts the last task's file changes. Checkpoint objects persist until
+Git prunes unreachable objects. Mason refuses to create a checkpoint when
+credential-bearing paths such as `.env`, private keys, or cloud configuration
+would be captured; `/undo` is unavailable for that task rather than storing the
+sensitive content.
 
 **Standing permissions** in `.mason/config.json` — allow-listed commands run
 without prompting, denied paths are hard lines that even `--yes` cannot
@@ -159,8 +166,12 @@ inside the REPL. The catalog is curated to coding models with tool-calling
 support (the measured floor for driving mason); ★ entries are measured in
 the provasign study.
 
-Model auto-detection: best installed local model first (catalog order),
-then any installed local model, then Anthropic, then OpenAI.
+When `--model` is omitted, model detection chooses one model: the last available
+model used for this repository, then the best installed local model, then
+Anthropic, then OpenAI. Explicit `--model auto` is different: it routes
+graph-shaped tasks to the measured small local tier and other coding tasks to
+the strongest installed local model. It does not currently route hard tasks to
+an API tier.
 
 **Nobody types model IDs.** `/model` shows ONE numbered list — installed
 local models, downloadable local models, a curated API shortlist (Claude
@@ -279,6 +290,11 @@ error paths scrub the key value.
 mason login anthropic    # store a key in the OS keychain
 mason logout anthropic   # remove it
 ```
+
+ChatGPT OAuth is experimental. `mason login chatgpt` implements PKCE token
+storage, but the provider remains disabled by default pending live endpoint
+validation and requires an explicitly configured `MASON_CHATGPT_BASE`. Do not
+describe it as a supported production login path.
 
 ## Testing
 
