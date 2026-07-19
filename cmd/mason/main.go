@@ -71,7 +71,6 @@ usage:
   mason sessions                list saved conversations for this directory
   mason models                  browse, download, and pick free local models
   mason login <anthropic|openai>    store an API key in the OS keychain
-  mason login chatgpt               experimental PKCE login; provider requires MASON_CHATGPT_BASE
   mason logout <anthropic|openai>   remove a stored API key
   mason version
 
@@ -121,15 +120,8 @@ func run(args []string) int {
 		switch args[0] {
 		case "login":
 			if len(args) < 2 {
-				fmt.Fprintln(os.Stderr, "usage: mason login <anthropic|openai|openrouter|chatgpt>")
+				fmt.Fprintln(os.Stderr, "usage: mason login <anthropic|openai|openrouter>")
 				return 2
-			}
-			if args[1] == "chatgpt" {
-				if err := creds.LoginChatGPT(); err != nil {
-					fmt.Fprintln(os.Stderr, "login:", err)
-					return 1
-				}
-				return 0
 			}
 			if err := creds.Login(args[1]); err != nil {
 				fmt.Fprintln(os.Stderr, "login:", err)
@@ -307,12 +299,6 @@ func run(args []string) int {
 		fmt.Fprintf(os.Stderr, "auto routing: graph tasks → %s · coding → %s\n", small, big)
 	}
 	p, err := provider.NewProvider(model, func(vendor string) (string, error) {
-		if vendor == "chatgpt-oauth" {
-			if tok := creds.GetOAuthAccessToken("chatgpt"); tok != "" {
-				return tok, nil
-			}
-			return "", fmt.Errorf("no ChatGPT sign-in found")
-		}
 		return creds.Get(vendor, interactive)
 	})
 	if err != nil {

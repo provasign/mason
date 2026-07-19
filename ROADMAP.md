@@ -20,7 +20,7 @@ compile oracles, quality gates).
 1. ✅ MCP client (consume GitHub/DB/Slack MCP servers)
 2. ✅ Git checkpointing + /undo per task
 3. ✅ OpenAI-compatible base-URL provider (LM Studio, llama.cpp, vLLM, OpenRouter)
-4. 🧪 Sign in with ChatGPT (experimental: PKCE storage exists; serving endpoint still requires live validation and `MASON_CHATGPT_BASE`)
+4. ⛔ Sign in with ChatGPT — dropped as a raw-model backend: reusing the Codex CLI client_id to drive a subscription from a third-party agent is outside OpenAI's terms (same reason Anthropic subscription OAuth is banned). Sanctioned raw-model paths are API keys + local models; a subscription can only be used ToS-clean by delegating a whole task to the vendor CLI (`claude -p`, `codex exec`), which bypasses Mason's harness.
 5. ✅ Permission policies: per-tool/per-path allowlists in .mason/config
 
 ## P1 — competitive weight

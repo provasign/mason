@@ -291,10 +291,19 @@ mason login anthropic    # store a key in the OS keychain
 mason logout anthropic   # remove it
 ```
 
-ChatGPT OAuth is experimental. `mason login chatgpt` implements PKCE token
-storage, but the provider remains disabled by default pending live endpoint
-validation and requires an explicitly configured `MASON_CHATGPT_BASE`. Do not
-describe it as a supported production login path.
+**Subscriptions are not a backend.** Mason's harness needs raw tool-calling
+model access, and Claude Pro/Max (Claude Code) and ChatGPT/Codex subscriptions
+are licensed for use *inside the vendor's own products*, not as a BYO model
+backend for a third-party agent. So the sanctioned raw-model paths are **API
+keys** (Anthropic/OpenAI) and **local models** — there is no compliant way to
+drive Mason's loop off a subscription login. (An earlier experimental "Sign in
+with ChatGPT" flow reused the Codex CLI's client_id to hit an endpoint directly;
+that is outside OpenAI's terms, so it was removed.) A ToS-clean way to *use* a
+subscription is to delegate a whole task to the vendor's own CLI (`claude -p`,
+`codex exec`) as a subprocess — but that runs the vendor's agent loop, not
+Mason's harness. To get graph-backed correctness on a subscription you already
+pay for, install Prism as an MCP server in Claude Code or Codex
+(`prism init --global`) rather than routing the model through Mason.
 
 ## Testing
 

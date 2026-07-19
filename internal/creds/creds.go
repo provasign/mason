@@ -44,15 +44,6 @@ func Has(vendor string) bool {
 	return err == nil && k != ""
 }
 
-// GetOAuthAccessToken returns the stored ChatGPT access token, "" if absent.
-func GetOAuthAccessToken(vendor string) string {
-	t := LoadTokens(vendor)
-	if t == nil {
-		return ""
-	}
-	return t.AccessToken
-}
-
 // Get resolves the credential for vendor. If interactive is true and no
 // stored credential exists, it prompts on the terminal (echo off) and
 // offers to store the key in the OS keychain.
