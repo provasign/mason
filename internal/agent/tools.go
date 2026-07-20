@@ -188,6 +188,36 @@ func diffSnippet(oldText, newText string) string {
 // "content" string of verbatim line-numbered windows + anchor summary,
 // already model-ready) and the classic symbols list (one header line per
 // symbol with its compressed content under it, grouped in ranking order).
+// renderObligations renders the unified prepare call's change obligations
+// compactly for the model: anchor, completeness tier, site count, and the
+// first few sites (full lists stay engine-side; the count is always exact).
+func renderObligations(v any) string {
+	obs := asSlice(v)
+	if len(obs) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, raw := range obs {
+		ob, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := ob["qualifiedName"].(string)
+		comp, _ := ob["completeness"].(string)
+		fmt.Fprintf(&b, "  %s — %v required sites (completeness: %s)\n", name, ob["siteCount"], comp)
+		for i, sraw := range asSlice(ob["sites"]) {
+			if i >= 5 {
+				fmt.Fprintf(&b, "    … and more (count above is exact)\n")
+				break
+			}
+			if site, ok := sraw.(map[string]any); ok {
+				fmt.Fprintf(&b, "    - %v  %v:%v\n", site["symbol"], site["file"], site["line"])
+			}
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 func formatCodeContext(res any) string {
 	b, err := json.Marshal(res)
 	if err != nil {
@@ -326,8 +356,25 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 		// models phrase context calls as "analyze/understand X" even mid-fix,
 		// which reads as explore-phase and yields the compact symbols list.
 		// A mutation task wants the edit-ready source windows (measured: the
-		// 30B re-read files the symbols delivery had already covered).
+		// 30B re-read files the symbols delivery had already covered) — and
+		// it goes through the unified prepare call, which adds the CHANGE
+		// OBLIGATIONS: every site that must be handled if the anchored
+		// contracts change, computed before the first edit (measured across
+		// three model tiers: 0.90-0.98 recall vs 0.72-0.96 for grep at
+		// 5-15x fewer tokens).
 		if mutationIntent.MatchString(s.curTask) {
+			res, err := s.invoke("prism", qargs)
+			if err == nil {
+				if m, ok := res.(map[string]any); ok {
+					out := formatCodeContext(m["read"])
+					if obs := renderObligations(m["obligations"]); obs != "" {
+						out += "\n\nCHANGE OBLIGATIONS (type-resolved; every site that must be " +
+							"handled if you change these contracts):\n" + obs
+					}
+					return out, nil
+				}
+			}
+			// Unified call unavailable (older engine) — fall back to query.
 			qargs["delivery"] = "source"
 		}
 		res, err := s.invoke("prism_query", qargs)

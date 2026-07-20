@@ -76,30 +76,49 @@ func TestCodeContextPassesThroughSourceDelivery(t *testing.T) {
 
 func TestCodeContextForcesSourceDeliveryOnMutationTask(t *testing.T) {
 	// The model phrases context calls as "analyze/understand X" even mid-fix,
-	// which phase-detects as explore. The USER task decides delivery: a
-	// mutation task forces delivery=source; a read-only task leaves it to
-	// prism's phase detection.
+	// which phase-detects as explore. The USER task decides the path: a
+	// mutation task routes through the unified `prism` prepare call (source
+	// delivery + change obligations); a read-only task stays on prism_query
+	// with delivery left to prism's phase detection.
+	var gotTool string
 	var got map[string]any
 	invoke := func(tool string, args map[string]any) (any, error) {
-		got = args
+		gotTool, got = tool, args
+		if tool == "prism" {
+			return map[string]any{
+				"read": map[string]any{"content": "**Source**\n1\tx\n", "delivery": "source"},
+				"obligations": []any{map[string]any{
+					"qualifiedName": "fetcher.Retry", "completeness": "closed",
+					"siteCount": float64(3),
+					"sites": []any{map[string]any{"symbol": "app.Use", "file": "app/use.go", "line": float64(9)}},
+				}},
+			}, nil
+		}
 		return map[string]any{"content": "**Source**\n1\tx\n", "delivery": "source"}, nil
 	}
 	s := New(nil, invoke, Options{Root: t.TempDir(), Out: io.Discard})
 
 	s.curTask = "fix the retry bug in the fetcher"
-	if _, err := s.runCodingTool(context.Background(), provider.ToolCall{Name: "code_context",
-		Args: map[string]any{"task": "analyze the retry logic", "terms": []any{"Retry"}}}); err != nil {
+	out, err := s.runCodingTool(context.Background(), provider.ToolCall{Name: "code_context",
+		Args: map[string]any{"task": "analyze the retry logic", "terms": []any{"Retry"}}})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got["delivery"] != "source" {
-		t.Errorf("mutation task should force delivery=source, got %v", got["delivery"])
+	if gotTool != "prism" {
+		t.Errorf("mutation task should route to the unified prism prepare call, got %q", gotTool)
+	}
+	if !strings.Contains(out, "CHANGE OBLIGATIONS") || !strings.Contains(out, "fetcher.Retry") {
+		t.Errorf("obligations missing from rendered context:\n%s", out)
 	}
 
 	s.curTask = "explain how the retry logic works"
-	got = nil
+	gotTool, got = "", nil
 	if _, err := s.runCodingTool(context.Background(), provider.ToolCall{Name: "code_context",
 		Args: map[string]any{"task": "analyze the retry logic", "terms": []any{"Retry"}}}); err != nil {
 		t.Fatal(err)
+	}
+	if gotTool != "prism_query" {
+		t.Errorf("read-only task should stay on prism_query, got %q", gotTool)
 	}
 	if _, present := got["delivery"]; present {
 		t.Errorf("read-only task must not force delivery, got %v", got["delivery"])
