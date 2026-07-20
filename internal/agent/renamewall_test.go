@@ -52,7 +52,7 @@ func TestRenameWallNarrowsAndReopens(t *testing.T) {
 		case "prism_rename_plan":
 			planCalls++
 			return renamePlanResult(3), nil
-		case "prism_index", "prism_untested_surface", "prism_dead_code":
+		case "prism_index", "prism_untested_surface", "prism_dead_code", "prism_verify":
 			return map[string]any{}, nil // quality-gate machinery, not under test
 		default:
 			t.Fatalf("unexpected engine op %q", tool)

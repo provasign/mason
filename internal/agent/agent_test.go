@@ -786,3 +786,56 @@ func TestCompactRender(t *testing.T) {
 		t.Fatal("group count header must always show the TRUE total")
 	}
 }
+
+// The completeness gate is non-discretionary: when the tree changed and the
+// engine's diff verdict is "incomplete", the agent gets ONE forced fix-it
+// turn carrying the exact missed sites — without the model ever choosing to
+// call verify. Measured rationale: agents given a verify tool skip it
+// exactly when most confident.
+func TestCompletenessGateNudgesOnIncomplete(t *testing.T) {
+	dir := t.TempDir()
+	fp := &fakeProvider{replies: []provider.Msg{
+		{Role: "assistant", Calls: []provider.ToolCall{{ID: "1", Name: "write_file",
+			Args: map[string]any{"path": "a.go", "content": "package a\n"}}}},
+		{Role: "assistant", Content: "changed the signature, done"},
+		{Role: "assistant", Content: "updated the missed caller too"},
+	}}
+	verifyCalls := 0
+	invoke := func(tool string, args map[string]any) (any, error) {
+		switch tool {
+		case "prism_verify":
+			verifyCalls++
+			if verifyCalls == 1 {
+				return map[string]any{
+					"verdict": "incomplete",
+					"missedSites": []any{map[string]any{
+						"qualifiedName": "app.Use", "file": "app/use.go",
+						"line": float64(12), "becauseOf": "signature of lib.Render changed"}},
+				}, nil
+			}
+			return map[string]any{"verdict": "complete"}, nil
+		}
+		return map[string]any{}, nil
+	}
+	s := New(fp, invoke, Options{Root: dir, Out: io.Discard})
+	reply, err := s.Ask(context.Background(), "change the Render signature in a.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "updated the missed caller too" {
+		t.Fatalf("reply = %q — the incomplete verdict did not force a fix-it turn", reply)
+	}
+	if verifyCalls < 2 {
+		t.Fatalf("verify ran %d times, want 2 (gate re-checks after the fix turn)", verifyCalls)
+	}
+	nudged := false
+	for _, m := range s.History() {
+		if m.Role == "user" && strings.Contains(m.Content, "Completeness gate") &&
+			strings.Contains(m.Content, "app/use.go") {
+			nudged = true
+		}
+	}
+	if !nudged {
+		t.Fatal("model never saw the completeness nudge with the missed site")
+	}
+}

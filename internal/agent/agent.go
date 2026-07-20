@@ -479,6 +479,7 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 	refusalNudged := false
 	groundingNudged := false
 	qualityNudged := false
+	verifyNudged := false
 	ranTests := false
 	toolsRan := 0
 	startFP := treeFingerprint(s.root)
@@ -633,6 +634,36 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 				changed := changedFilesSince(s.root, startStatus)
 				findings := scanQuality(s.root, changed)
 				untested, deadNew := s.engineChecks(changed)
+				// Diff-completeness gate: the engine checks the diff for
+				// contract changes whose required sites the edit did not
+				// touch. Non-discretionary by design — measured: agents
+				// given a verify tool skip it exactly when most confident.
+				// The verdict is fail-closed (never a false "complete");
+				// incomplete gets ONE forced fix-it turn with the exact
+				// sites, review prints a warning and moves on.
+				if verdict, missed, unverified := s.verifyDiff(); verdict == "incomplete" && !verifyNudged {
+					verifyNudged = true
+					var b strings.Builder
+					b.WriteString("Completeness gate — the engine checked this diff and it is INCOMPLETE. " +
+						"A contract you changed still has dependent sites the diff never touched:\n")
+					for _, m := range missed {
+						b.WriteString("  - " + m + "\n")
+					}
+					b.WriteString("Update every site listed (same contract change), then finish. " +
+						"If a site genuinely needs no change, say why explicitly.")
+					s.msgs = append(s.msgs, reply, provider.Msg{Role: "user", Content: b.String()})
+					continue
+				} else if verdict == "incomplete" {
+					fmt.Fprintf(s.out, "\n%s\n", s.st.yellow("⚠ mason completeness gate — diff still incomplete:"))
+					for _, m := range missed {
+						fmt.Fprintf(s.out, "%s\n", s.st.yellow("  · "+m))
+					}
+				} else if verdict == "review" {
+					fmt.Fprintf(s.out, "\n%s\n", s.st.yellow("◆ graph: contract changes the engine could not fully verify — review:"))
+					for _, u := range unverified {
+						fmt.Fprintf(s.out, "%s\n", s.st.yellow("  · "+u))
+					}
+				}
 				testsInScope := touchedTests(changed) || strings.Contains(strings.ToLower(task), "test")
 				if testsInScope {
 					for _, u := range untested {
@@ -897,6 +928,44 @@ func compactArgs(args map[string]any) string {
 // which new functions have no test coverage (untested_surface, closed-set)
 // and which are unreachable from any entry point (dead_code). Bounded and
 // best-effort — engine hiccups must never block a task.
+// verifyDiff runs the engine's diff-completeness check (prism_verify) over
+// the working tree. Returns the fail-closed verdict, missed sites rendered
+// one-per-line, and unverified contract changes. Degrades to verdict ""
+// (gate silently skipped) when the engine is unavailable or errors — the
+// quality gate must never block a task on infrastructure.
+func (s *Session) verifyDiff() (verdict string, missed, unverified []string) {
+	if s.invoke == nil {
+		return "", nil, nil
+	}
+	res, err := s.invoke("prism_verify", map[string]any{})
+	if err != nil {
+		return "", nil, nil
+	}
+	m, ok := res.(map[string]any)
+	if !ok {
+		return "", nil, nil
+	}
+	verdict, _ = m["verdict"].(string)
+	for _, raw := range asSlice(m["missedSites"]) {
+		ms, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := ms["qualifiedName"].(string)
+		if name == "" {
+			name, _ = ms["symbol"].(string)
+		}
+		because, _ := ms["becauseOf"].(string)
+		missed = append(missed, fmt.Sprintf("%s  %v:%v  (%s)", name, ms["file"], ms["line"], because))
+	}
+	for _, raw := range asSlice(m["unverifiedSeeds"]) {
+		if s, ok := raw.(string); ok {
+			unverified = append(unverified, s)
+		}
+	}
+	return verdict, missed, unverified
+}
+
 func (s *Session) engineChecks(changed []string) (untested, deadNew []qualityFinding) {
 	if s.invoke == nil || s.opts.FileSymbols == nil || len(changed) == 0 || len(changed) > 10 {
 		return nil, nil
