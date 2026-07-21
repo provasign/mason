@@ -937,6 +937,12 @@ func (s *Session) verifyDiff() (verdict string, missed, unverified []string) {
 	if s.invoke == nil {
 		return "", nil, nil
 	}
+	// Benchmarking hook: MASON_SKIP_VERIFY_GATE=1 leaves the diff UNGATED so
+	// an experiment can measure what prism verify catches on raw agent
+	// output. Not for normal use — the gate is the point of the product.
+	if os.Getenv("MASON_SKIP_VERIFY_GATE") == "1" {
+		return "", nil, nil
+	}
 	res, err := s.invoke("prism_verify", map[string]any{})
 	if err != nil {
 		return "", nil, nil
