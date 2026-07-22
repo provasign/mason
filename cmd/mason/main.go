@@ -313,18 +313,22 @@ func run(args []string) int {
 	}
 	fmt.Fprintf(os.Stderr, "mason %s · %s · %s\n", version, p.Name(), root)
 	var invoke agent.Invoker
-	k, kerr := kit.Open(root)
-	if kerr != nil {
+	var k *kit.Kit
+	// Benchmarking hook: MASON_NO_ENGINE=1 runs mason as a pure coding agent
+	// (grep/read/write only, no graph tools, no completeness gate) — the
+	// "without Prism" arm for A/B measurement. Not for normal use.
+	if os.Getenv("MASON_NO_ENGINE") == "1" {
+		fmt.Fprintln(os.Stderr, "⚠ MASON_NO_ENGINE=1 — running without the code graph (benchmark mode)")
+	} else if kk, kerr := kit.Open(root); kerr != nil {
 		// Engine failure must not brick the agent: degrade to coding tools.
 		fmt.Fprintf(os.Stderr, "⚠ code graph unavailable (%v) — graph operations disabled this session\n", kerr)
 	} else {
+		k = kk
 		defer k.Close()
 		// Delta-index so the graph reflects the CURRENT tree — answers from a
 		// stale graph are wrong answers. Cheap when nothing changed.
 		if _, err := k.Invoke("prism_index", map[string]any{}); err != nil {
 			fmt.Fprintf(os.Stderr, "⚠ index failed (%v) — graph operations disabled this session\n", err)
-			k.Close()
-			k = nil
 		} else {
 			invoke = k.Invoke
 		}
