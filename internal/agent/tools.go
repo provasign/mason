@@ -479,6 +479,20 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 		if err != nil {
 			return "", err
 		}
+		// No-op guard: an edit whose new_text is byte-identical to old_text
+		// changes nothing, yet strings.Replace + WriteFile would still report
+		// success — handing the model a phantom "edit applied" it cannot tell
+		// from a real one. A local model that then re-reads and sees the text
+		// unchanged has no way to reconcile "I edited it" with "it looks the
+		// same" and spirals (observed: qwen3-coder:30b wandered 20 min and
+		// scattered scratch files after exactly this). Reject it loudly and
+		// steer: either the change is already present (so the task may be done)
+		// or the replacement is wrong.
+		if oldText == newText {
+			return "", fmt.Errorf("no-op edit in %s: new_text is identical to old_text, so nothing changed. "+
+				"If the intended change is ALREADY present in the file, the task may be complete — verify and stop. "+
+				"Otherwise your new_text does not actually apply the change; make new_text different from old_text", path)
+		}
 		n := strings.Count(string(data), oldText)
 		if n == 0 {
 			return "", fmt.Errorf("old_text not found in %s", path)
@@ -486,7 +500,15 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 		if n > 1 {
 			return "", fmt.Errorf("old_text matches %d times in %s — provide a larger unique snippet", n, path)
 		}
-		if err := os.WriteFile(abs, []byte(strings.Replace(string(data), oldText, newText, 1)), 0o644); err != nil {
+		updated := strings.Replace(string(data), oldText, newText, 1)
+		if updated == string(data) {
+			// Defensive: old_text matched but the resulting bytes are unchanged
+			// (e.g. new_text differs only outside the matched span). Treat as
+			// no-op rather than a false success.
+			return "", fmt.Errorf("edit produced no change in %s: the file bytes are identical after the replacement. "+
+				"Verify whether the change is already present (task may be done) or fix new_text", path)
+		}
+		if err := os.WriteFile(abs, []byte(updated), 0o644); err != nil {
 			return "", err
 		}
 		s.mutated = true

@@ -205,6 +205,30 @@ func TestEditFileExactness(t *testing.T) {
 	}
 }
 
+// edit_file must reject a no-op edit (new_text identical to old_text) with an
+// error instead of reporting a phantom "edit applied" — the false success that
+// sent a local model into a 20-minute wander after it "successfully" changed
+// nothing. The error must steer toward the correct terminal state (already
+// present -> stop, or fix new_text).
+func TestEditFileRejectsNoOp(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "z.go")
+	os.WriteFile(path, []byte("keep me\n"), 0o644)
+	s := New(&fakeProvider{}, nil, Options{Root: dir, Out: io.Discard})
+	_, err := s.runCodingTool(context.Background(), provider.ToolCall{Name: "edit_file",
+		Args: map[string]any{"path": "z.go", "old_text": "keep me\n", "new_text": "keep me\n"}})
+	if err == nil {
+		t.Fatal("no-op edit (new_text == old_text) must fail, not report success")
+	}
+	if !strings.Contains(err.Error(), "no-op") && !strings.Contains(err.Error(), "identical") {
+		t.Fatalf("no-op error should explain the no-op; got %v", err)
+	}
+	// The file must be untouched.
+	if got, _ := os.ReadFile(path); string(got) != "keep me\n" {
+		t.Fatalf("no-op edit mutated the file: %q", got)
+	}
+}
+
 // Denied permission must surface as a tool error, not execute.
 func TestPermissionGate(t *testing.T) {
 	dir := t.TempDir()
