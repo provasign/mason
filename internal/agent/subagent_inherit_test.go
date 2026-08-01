@@ -38,11 +38,14 @@ func TestSubagentInheritsConstrainingOptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	start := strings.Index(string(src), "func (s *Session) runSubagent(")
+	// Normalize line endings before scanning: a Windows checkout with
+	// autocrlf writes \r\n, and the "\n}\n" delimiter below never matches.
+	text := strings.ReplaceAll(string(src), "\r\n", "\n")
+	start := strings.Index(text, "func (s *Session) runSubagent(")
 	if start < 0 {
 		t.Fatal("runSubagent not found in agent.go")
 	}
-	rest := string(src)[start:]
+	rest := text[start:]
 	end := strings.Index(rest, "\n}\n")
 	if end < 0 {
 		t.Fatal("could not delimit runSubagent")

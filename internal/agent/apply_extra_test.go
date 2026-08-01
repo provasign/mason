@@ -77,14 +77,22 @@ func TestApplyRenamePlanPreservesMode(t *testing.T) {
 		map[string]any{"filePath": "run.sh", "line": float64(1),
 			"before": "GetById", "after": "GetDataKeyById"},
 	}}
-	if _, _, _, err := applyRenamePlan(io.Discard, dir, plan, false); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(path)
+	before, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o755 {
-		t.Errorf("mode = %v, want 0755", info.Mode().Perm())
+	if _, _, _, err := applyRenamePlan(io.Discard, dir, plan, false); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Compare against what the file ACTUALLY had, not a literal 0755:
+	// Windows has no Unix permission bits, so the create mode is not the
+	// mode you read back. "Unchanged" is the real contract and it is the
+	// one that is portable.
+	if after.Mode().Perm() != before.Mode().Perm() {
+		t.Errorf("mode changed: %v -> %v", before.Mode().Perm(), after.Mode().Perm())
 	}
 }
