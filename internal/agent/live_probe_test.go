@@ -34,11 +34,7 @@ func TestLiveEngineProbe(t *testing.T) {
 			}
 			return out
 		}})
-	untested, dead := s.engineChecks([]string{"src/stats.py"})
-	fmt.Println("UNTESTED:")
-	for _, u := range untested {
-		fmt.Println("  ", u.String())
-	}
+	dead := s.engineChecks([]string{"src/stats.py"})
 	fmt.Println("DEAD:")
 	for _, d := range dead {
 		fmt.Println("  ", d.String())

@@ -10,7 +10,7 @@ import (
 
 // Engine-verified branch review: everything here is deterministic — the
 // code graph and the diff, no model in the loop. Output is a work list a
-// reviewer (or CI) can trust: blast radius per changed symbol, coverage
+// reviewer (or CI) can trust: blast radius per changed symbol
 // gaps, placeholder tests, stubs, and newly unreachable code.
 
 // ReviewFinding is one item in the review report.
@@ -173,7 +173,7 @@ func (s *Session) Review(base string) (*ReviewReport, error) {
 			Severity: "warn", File: q.file, Line: q.line, Text: q.what})
 	}
 
-	// 2) Per touched symbol: blast radius + coverage.
+	// 2) Per touched symbol: blast radius.
 	for _, f := range changed {
 		if !isSourceFile(f) || testFileRe.MatchString(f) {
 			continue
@@ -215,30 +215,6 @@ func (s *Session) Review(base string) (*ReviewReport, error) {
 				rep.Findings = append(rep.Findings, ReviewFinding{Severity: "warn",
 					File: f, Line: sym.Line,
 					Text: fmt.Sprintf("%s impact could not be verified: %v", q, err)})
-			}
-			// Coverage is authoritative only when the engine classifies the symbol.
-			s.setStatus("review: coverage %s", q)
-			res, err := s.invoke("prism_untested_surface", map[string]any{"query": q})
-			if err != nil {
-				rep.Findings = append(rep.Findings, ReviewFinding{Severity: "warn",
-					File: f, Line: sym.Line,
-					Text: fmt.Sprintf("%s coverage could not be verified: %v", q, err)})
-				continue
-			}
-			full, _ := res.(map[string]any)
-			if full == nil {
-				rep.Findings = append(rep.Findings, ReviewFinding{Severity: "warn",
-					File: f, Line: sym.Line,
-					Text: q + " coverage could not be classified by the engine"})
-				continue
-			}
-			if len(asSlice(full["covered"])) == 0 {
-				text := sym.Name + " changed in this diff and no test covers it"
-				if len(asSlice(full["untested"])) == 0 {
-					text = q + " coverage could not be classified by the engine"
-				}
-				rep.Findings = append(rep.Findings, ReviewFinding{Severity: "warn",
-					File: f, Line: sym.Line, Text: text})
 			}
 		}
 	}

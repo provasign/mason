@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/provasign/mason/internal/provider"
 	"github.com/provasign/mason/internal/trail"
@@ -32,15 +33,14 @@ search on exactly these shapes):
   deprecation → change_impact. NEVER grep for callers of a known symbol.
 - A rename → rename_plan, then apply_rename_plan. NEVER edit rename sites
   by hand; the harness applies the plan.
-- "Who fails to implement X" → missing_implementations.
-  "What should I test" → untested_surface. Cleanups → dead_code.
+- "Who fails to implement X" → missing_implementations. Cleanups → dead_code.
 - Starting a task that spans files → code_context FIRST: one call returns
-  the matching symbols plus callers/callees/tests, compressed. It replaces
+  the matching symbols plus callers/callees, compressed. It replaces
   a chain of read_file/grep round-trips. EXCEPTION: renames, signature
   changes, and deprecations — rename_plan / change_impact are already the
   complete answer; calling code_context for those wastes turns.
 - For bug fixes, code_context returns verbatim LINE-NUMBERED source blocks
-  (same format as read_file) plus each anchor's callers and covering tests.
+  (same format as read_file) plus each anchor's callers.
   Those blocks ARE reads you already performed: do not read_file the same
   files again — edit directly. The anchor lines tell you the blast radius;
   prefer fixing at the anchor the failing behavior names, not a deeper
@@ -81,7 +81,7 @@ Working style:
 // graphIntent detects task shapes that are measured graph-wins; for these
 // the first model turn is walled onto the graph tools (invocation wall) so
 // routing cannot wander into text search.
-var graphIntent = regexp.MustCompile(`(?i)\b(rename|callers?\b|call sites?|change[- ]impact|signature|deprecat|every (site|place|caller|usage)|all (sites|places|callers|usages)|who (implements|breaks)|missing implementation|untested|dead code|unused (code|symbols|functions))`)
+var graphIntent = regexp.MustCompile(`(?i)\b(rename|callers?\b|call sites?|change[- ]impact|signature|deprecat|every (site|place|caller|usage)|all (sites|places|callers|usages)|who (implements|breaks)|missing implementation|dead code|unused (code|symbols|functions))`)
 
 // refusal detects the lazy-model failure: answering "I don't have enough
 // information / could you provide the code" when the repository — and the
@@ -101,25 +101,25 @@ var mutationIntent = regexp.MustCompile(`(?i)\b(add|create|fix|change|implement|
 
 // Options configures a Session.
 type Options struct {
-	Root         string
-	Out          io.Writer
-	MaxTurns     int                      // per Ask; default 30
-	Permit       func(action string) bool // gate for bash/edit/write; nil = allow
-	ProjectNotes string                   // AGENTS.md/MASON.md content appended to the system prompt
-	CtxChars     int                      // history size that triggers auto-compaction (chars); default 400k
-	Stream       bool                     // stream assistant text as it arrives (providers that support it)
-	Color        bool                     // ANSI styling for the interactive terminal
-	Render       func(string) string      // optional final-text formatter (e.g. markdown → ANSI)
-	PermitDetail func(action, detail string) bool // permission gate WITH a preview (diffs); falls back to Permit
-	Depth        int                      // 0 = top-level; subagents run at 1 and cannot recurse
-	NewProvider  func(spec string) (provider.Provider, error) // for subagent model overrides
-	FileSymbols  func(path string) []SymbolInfo // engine hook: indexed symbols of a repo-relative file
-	Status       func(activity string)          // live activity narration for the UI status bar
-	NoRedact     bool                           // disable secret redaction (default ON)
-	CompactRender int                           // cap items per rendered group (0 = show all)
-	Policy       *Policy                        // standing permissions (.mason/config.json)
-	MaxCostUSD   float64                        // stop when estimated session cost reaches this (0 = no budget)
-	CostFn       func(in, out, cacheRead, cacheWrite int) float64 // session-cost estimator for the budget
+	Root          string
+	Out           io.Writer
+	MaxTurns      int                                              // per Ask; default 30
+	Permit        func(action string) bool                         // gate for bash/edit/write; nil = allow
+	ProjectNotes  string                                           // AGENTS.md/MASON.md content appended to the system prompt
+	CtxChars      int                                              // history size that triggers auto-compaction (chars); default 400k
+	Stream        bool                                             // stream assistant text as it arrives (providers that support it)
+	Color         bool                                             // ANSI styling for the interactive terminal
+	Render        func(string) string                              // optional final-text formatter (e.g. markdown → ANSI)
+	PermitDetail  func(action, detail string) bool                 // permission gate WITH a preview (diffs); falls back to Permit
+	Depth         int                                              // 0 = top-level; subagents run at 1 and cannot recurse
+	NewProvider   func(spec string) (provider.Provider, error)     // for subagent model overrides
+	FileSymbols   func(path string) []SymbolInfo                   // engine hook: indexed symbols of a repo-relative file
+	Status        func(activity string)                            // live activity narration for the UI status bar
+	NoRedact      bool                                             // disable secret redaction (default ON)
+	CompactRender int                                              // cap items per rendered group (0 = show all)
+	Policy        *Policy                                          // standing permissions (.mason/config.json)
+	MaxCostUSD    float64                                          // stop when estimated session cost reaches this (0 = no budget)
+	CostFn        func(in, out, cacheRead, cacheWrite int) float64 // session-cost estimator for the budget
 	// Diagnostics is the LSP feed: language-server findings for a file the
 	// agent just wrote (absolute path). Fed into the tool result so the
 	// model sees breakage at edit time. nil = disabled.
@@ -162,20 +162,21 @@ type Session struct {
 	// apply+bash — measured: with a polluted context a 30B ignores the
 	// textual "call apply_rename_plan again" instruction and hand-edits 9
 	// files one by one (the pre-v0.3.1 pathology back from the dead).
-	renamePlanPending   bool // plan produced, not yet applied at all
-	renameAmbiguousLeft int  // ambiguous edits not yet applied
-	checkpoints    []string // snapshot commits, newest last (/undo)
-	curTask        string   // the user task being served; steers code_context delivery
-	pendingNote    string   // folded into the next task message (e.g. undo notice)
-	pendingImages     []provider.Image // queued by --image for the next task
-	pendingImageNames []string
-	plan           bool  // read-only (plan) mode: mutating tools are refused
-	mutated        bool  // any mutating tool ran during the current Ask
-	usageIn        int   // session-total input tokens
-	usageOut       int   // session-total output tokens
-	usageCacheR    int   // session-total cache-read tokens
-	usageCacheW    int   // session-total cache-write tokens
-	st             style // terminal styling
+	verifySkipOnce      sync.Once        // warn once when the verify gate is disabled
+	renamePlanPending   bool             // plan produced, not yet applied at all
+	renameAmbiguousLeft int              // ambiguous edits not yet applied
+	checkpoints         []string         // snapshot commits, newest last (/undo)
+	curTask             string           // the user task being served; steers code_context delivery
+	pendingNote         string           // folded into the next task message (e.g. undo notice)
+	pendingImages       []provider.Image // queued by --image for the next task
+	pendingImageNames   []string
+	plan                bool  // read-only (plan) mode: mutating tools are refused
+	mutated             bool  // any mutating tool ran during the current Ask
+	usageIn             int   // session-total input tokens
+	usageOut            int   // session-total output tokens
+	usageCacheR         int   // session-total cache-read tokens
+	usageCacheW         int   // session-total cache-write tokens
+	st                  style // terminal styling
 }
 
 func New(p provider.Provider, invoke Invoker, opts Options) *Session {
@@ -199,6 +200,9 @@ func New(p provider.Provider, invoke Invoker, opts Options) *Session {
 		opts.CtxChars = 400_000
 	}
 	sys := systemPrompt
+	if walkMode() {
+		sys += walkSteer
+	}
 	if opts.ProjectNotes != "" {
 		sys += "\n\nProject instructions (from the repository's AGENTS.md/MASON.md):\n" + opts.ProjectNotes
 	}
@@ -458,6 +462,8 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 	tools := toolDefs()
 	if s.invoke == nil {
 		tools = codingToolsOnly(tools) // engine unavailable — degrade gracefully
+	} else if walkMode() {
+		tools = walkTools(tools) // part-by-part graph walk: graph_focus, not the code_context dump
 	}
 	tools = append(tools, s.opts.ExtraTools...)
 	graphOnly := graphToolsOnly(tools)
@@ -578,12 +584,14 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 					if !shown {
 						fmt.Fprintf(s.out, "\n%s\n", s.renderFinal(text))
 					}
+					s.reportGates(startFP, startStatus, ranTests)
 					fmt.Fprintf(s.out, "%s\n", s.st.yellow(fmt.Sprintf(
 						"⚠ cost budget reached: session ≈ $%.4f (--max-cost %.2f)", cost, s.opts.MaxCostUSD)))
 					return text, nil
 				}
 				s.msgs = append(s.msgs, provider.Msg{Role: "assistant",
 					Content: "[task stopped: cost budget reached before completion]"})
+				s.reportGates(startFP, startStatus, ranTests)
 				fmt.Fprintf(s.out, "%s\n", s.st.yellow(fmt.Sprintf(
 					"⚠ stopping: cost budget $%.2f reached (session ≈ $%.4f) — work may be incomplete", s.opts.MaxCostUSD, cost)))
 				return "", fmt.Errorf("cost budget $%.2f reached (session ≈ $%.4f)", s.opts.MaxCostUSD, cost)
@@ -633,7 +641,7 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 				}
 				changed := changedFilesSince(s.root, startStatus)
 				findings := scanQuality(s.root, changed)
-				untested, deadNew := s.engineChecks(changed)
+				deadNew := s.engineChecks(changed)
 				// Diff-completeness gate: the engine checks the diff for
 				// contract changes whose required sites the edit did not
 				// touch. Non-discretionary by design — measured: agents
@@ -664,12 +672,6 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 						fmt.Fprintf(s.out, "%s\n", s.st.yellow("  · "+u))
 					}
 				}
-				testsInScope := touchedTests(changed) || strings.Contains(strings.ToLower(task), "test")
-				if testsInScope {
-					for _, u := range untested {
-						findings = append(findings, u)
-					}
-				}
 				testsNotRun := touchedTests(changed) && !ranTests
 				if (len(findings) > 0 || testsNotRun) && !qualityNudged {
 					qualityNudged = true
@@ -694,12 +696,6 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 					}
 					if testsNotRun {
 						fmt.Fprintf(s.out, "%s\n", s.st.yellow("  · tests were written but never run"))
-					}
-				}
-				if !testsInScope && len(untested) > 0 {
-					fmt.Fprintf(s.out, "%s\n", s.st.yellow("◆ graph: new code without test coverage (engine-verified):"))
-					for _, u := range untested {
-						fmt.Fprintf(s.out, "%s\n", s.st.yellow("  · "+u.String()))
 					}
 				}
 				for _, d := range deadNew {
@@ -770,12 +766,60 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 			if !shown {
 				fmt.Fprintf(s.out, "\n%s\n", s.renderFinal(text))
 			}
+			s.reportGates(startFP, startStatus, ranTests)
 			fmt.Fprintf(s.out, "%s\n", s.st.yellow(fmt.Sprintf(
 				"⚠ hit the %d-turn budget — the work may be complete, but this summary is unverified; check the tree (raise with --max-turns)", s.opts.MaxTurns)))
 			return text, nil
 		}
 	}
+	s.reportGates(startFP, startStatus, ranTests)
 	return "", fmt.Errorf("gave up after %d turns", s.opts.MaxTurns)
+}
+
+// reportGates runs the completeness and quality gates in REPORT-ONLY mode:
+// no forced fix-it turn, just the findings printed. It exists for the exits
+// that leave the normal end-of-task path — turn exhaustion and the cost
+// budget. Those exits happen precisely when a task ran long or expensive,
+// i.e. exactly when a diff is most likely to be incomplete, and skipping the
+// gate there quietly turned "the harness always checks the diff" into "the
+// harness checks the diff unless the model ran out of room". The gate is
+// fail-closed by design; an exit path that bypasses it is a hole in the
+// claim, not a shortcut.
+func (s *Session) reportGates(startFP string, startStatus map[string]string, ranTests bool) {
+	if !s.treeChanged(startFP) {
+		return
+	}
+	if s.invoke != nil {
+		_, _ = s.invoke("prism_index", map[string]any{})
+	}
+	changed := changedFilesSince(s.root, startStatus)
+	verdict, missed, unverified := s.verifyDiff()
+	switch verdict {
+	case "incomplete":
+		fmt.Fprintf(s.out, "\n%s\n", s.st.yellow("⚠ mason completeness gate — diff is INCOMPLETE (no turns left to fix it):"))
+		for _, m := range missed {
+			fmt.Fprintf(s.out, "%s\n", s.st.yellow("  · "+m))
+		}
+	case "review":
+		fmt.Fprintf(s.out, "\n%s\n", s.st.yellow("◆ graph: contract changes the engine could not fully verify — review:"))
+		for _, u := range unverified {
+			fmt.Fprintf(s.out, "%s\n", s.st.yellow("  · "+u))
+		}
+	}
+	findings := scanQuality(s.root, changed)
+	testsNotRun := touchedTests(changed) && !ranTests
+	if len(findings) > 0 || testsNotRun {
+		fmt.Fprintf(s.out, "\n%s\n", s.st.yellow("⚠ mason quality gate — remaining issues:"))
+		for _, f := range findings {
+			fmt.Fprintf(s.out, "%s\n", s.st.yellow("  · "+f.String()))
+		}
+		if testsNotRun {
+			fmt.Fprintf(s.out, "%s\n", s.st.yellow("  · tests were written but never run"))
+		}
+	}
+	for _, d := range s.engineChecks(changed) {
+		fmt.Fprintf(s.out, "%s\n", s.st.yellow("◆ graph: "+d.String()))
+	}
 }
 
 // dispatch routes one tool call. Graph ops go through payload isolation;
@@ -817,10 +861,21 @@ func (s *Session) dispatch(ctx context.Context, call provider.ToolCall, tr *trai
 		}
 		detail += " — full plan listed above"
 		if !s.permitDetail("apply rename plan to working tree", detail) {
+			// Drop the wall. It offers apply_rename_plan and nothing else,
+			// so leaving it up after a refusal re-asks the same question
+			// every turn until the budget is gone — the user already said
+			// no, and the session has other work it could do.
+			s.renamePlanPending = false
+			s.renameAmbiguousLeft = 0
 			return "", fmt.Errorf("user denied apply")
 		}
 		applied, skipped, ambLeft, err := applyRenamePlan(s.out, s.root, s.lastRenamePlan, includeAmbiguous)
 		if err != nil {
+			// Same reasoning: apply is all-or-nothing, so a failure leaves
+			// the tree untouched and retrying the identical call cannot
+			// succeed. Release the wall and let the model report the error.
+			s.renamePlanPending = false
+			s.renameAmbiguousLeft = 0
 			return "", err
 		}
 		s.mutated = true
@@ -889,21 +944,50 @@ func (s *Session) runSubagent(ctx context.Context, call provider.ToolCall, tr *t
 	}
 	s.setStatus("subagent: %s", truncate(task, 60))
 	fmt.Fprintf(s.out, "  %s\n", s.st.cyan("⑂ subagent: "+truncate(task, 100)))
+	// Everything that CONSTRAINS the parent is inherited. A subagent runs
+	// the same tools against the same tree, so an option the parent is held
+	// to and the child is not is a hole in that option: a policy that denies
+	// `git push` denied nothing if the model could delegate the push, hooks
+	// stopped being deterministic, and redaction stopped being on. Only the
+	// options that describe the parent's UI (Status, Render, ProjectNotes,
+	// Router) are deliberately not passed down.
 	sub := New(p, s.invoke, Options{
 		Root: s.root,
 		Out:  &prefixWriter{w: s.out, prefix: "  │ "},
 		// Half the parent budget: a runaway subagent must not eat the session.
-		MaxTurns: s.opts.MaxTurns / 2,
-		Permit:   s.opts.Permit,
-		CtxChars: s.opts.CtxChars,
-		Color:    s.opts.Color,
-		Depth:    s.opts.Depth + 1,
+		MaxTurns:      s.opts.MaxTurns / 2,
+		Permit:        s.opts.Permit,
+		PermitDetail:  s.opts.PermitDetail,
+		CtxChars:      s.opts.CtxChars,
+		Color:         s.opts.Color,
+		Depth:         s.opts.Depth + 1,
+		Policy:        s.opts.Policy,
+		Hooks:         s.opts.Hooks,
+		NoRedact:      s.opts.NoRedact,
+		Diagnostics:   s.opts.Diagnostics,
+		FileSymbols:   s.opts.FileSymbols,
+		CompactRender: s.opts.CompactRender,
+		// Cost: the child spends from the same wallet, so it inherits the
+		// ceiling. Its own spend is added to the parent's totals below, and
+		// the parent re-checks the budget on its next turn.
+		MaxCostUSD:  s.opts.MaxCostUSD,
+		CostFn:      s.opts.CostFn,
+		ExtraTools:  s.opts.ExtraTools,
+		ExtraInvoke: s.opts.ExtraInvoke,
 	})
 	sub.plan = s.plan // a read-only session must not mutate via a subagent
 	reply, err := sub.Ask(ctx, task)
 	in, out := sub.Usage()
 	s.usageIn += in
 	s.usageOut += out
+	// Cache tokens are billed too — omitting them made every subagent's
+	// spend invisible to /cost and to the --max-cost budget.
+	cr, cw := sub.CacheUsage()
+	s.usageCacheR += cr
+	s.usageCacheW += cw
+	if sub.mutated {
+		s.mutated = true
+	}
 	if err != nil {
 		return "", fmt.Errorf("subagent: %w", err)
 	}
@@ -925,9 +1009,8 @@ func compactArgs(args map[string]any) string {
 }
 
 // engineChecks interrogates the code graph about a task's changed files:
-// which new functions have no test coverage (untested_surface, closed-set)
-// and which are unreachable from any entry point (dead_code). Bounded and
-// best-effort — engine hiccups must never block a task.
+// which new functions are unreachable from any entry point (dead_code).
+// Bounded and best-effort — engine hiccups must never block a task.
 // verifyDiff runs the engine's diff-completeness check (prism_verify) over
 // the working tree. Returns the fail-closed verdict, missed sites rendered
 // one-per-line, and unverified contract changes. Degrades to verdict ""
@@ -941,6 +1024,13 @@ func (s *Session) verifyDiff() (verdict string, missed, unverified []string) {
 	// an experiment can measure what prism verify catches on raw agent
 	// output. Not for normal use — the gate is the point of the product.
 	if os.Getenv("MASON_SKIP_VERIFY_GATE") == "1" {
+		// Say so, once per session. A disabled gate that announces nothing
+		// is indistinguishable from a gate that passed — the operator (or a
+		// benchmark reading the transcript) has no way to tell the diff was
+		// never checked.
+		s.verifySkipOnce.Do(func() {
+			fmt.Fprintln(os.Stderr, "⚠ MASON_SKIP_VERIFY_GATE=1 — the diff-completeness gate is DISABLED (benchmark mode)")
+		})
 		return "", nil, nil
 	}
 	res, err := s.invoke("prism_verify", map[string]any{})
@@ -972,54 +1062,13 @@ func (s *Session) verifyDiff() (verdict string, missed, unverified []string) {
 	return verdict, missed, unverified
 }
 
-func (s *Session) engineChecks(changed []string) (untested, deadNew []qualityFinding) {
-	if s.invoke == nil || s.opts.FileSymbols == nil || len(changed) == 0 || len(changed) > 10 {
-		return nil, nil
+func (s *Session) engineChecks(changed []string) (deadNew []qualityFinding) {
+	if s.invoke == nil || len(changed) == 0 || len(changed) > 10 {
+		return nil
 	}
 	changedSet := map[string]bool{}
-	var prodFiles []string
 	for _, f := range changed {
 		changedSet[f] = true
-		if !testFileRe.MatchString(f) && isSourceFile(f) {
-			prodFiles = append(prodFiles, f)
-		}
-	}
-	if len(prodFiles) > 5 {
-		prodFiles = prodFiles[:5]
-	}
-	checked := 0
-	for _, f := range prodFiles {
-		for _, sym := range s.opts.FileSymbols(f) {
-			if checked >= 8 {
-				break
-			}
-			k := strings.ToLower(sym.Kind)
-			if k != "function" && k != "method" {
-				continue
-			}
-			q := sym.QualifiedName
-			if q == "" {
-				q = sym.Name
-			}
-			checked++
-			res, err := s.invoke("prism_untested_surface", map[string]any{"query": q})
-			if err == nil {
-				full, _ := res.(map[string]any)
-				if full != nil && len(asSlice(full["untested"])) > 0 && len(asSlice(full["covered"])) == 0 {
-					untested = append(untested, qualityFinding{file: f, line: sym.Line,
-						what: q + " has NO test coverage (engine-verified, closed set)"})
-				}
-				continue
-			}
-			// untested_surface is type/method-scoped and rejects FREE
-			// functions (most of a fresh Python/Go project; engine follow-up
-			// filed) — fall back to a deterministic scan: does ANY test file
-			// in the repo reference this name?
-			if s.noTestReferences(sym.Name) {
-				untested = append(untested, qualityFinding{file: f, line: sym.Line,
-					what: q + " is referenced by no test file"})
-			}
-		}
 	}
 	if res, err := s.invoke("prism_dead_code", map[string]any{}); err == nil {
 		if full, _ := res.(map[string]any); full != nil {
@@ -1044,48 +1093,7 @@ func (s *Session) engineChecks(changed []string) (untested, deadNew []qualityFin
 			}
 		}
 	}
-	return untested, deadNew
-}
-
-// noTestReferences scans the repository's test files for a word-boundary
-// mention of name. Bounded; errs on the side of silence.
-func (s *Session) noTestReferences(name string) bool {
-	if len(name) < 3 { // too generic to judge
-		return false
-	}
-	re, err := regexp.Compile(`\b` + regexp.QuoteMeta(name) + `\b`)
-	if err != nil {
-		return false
-	}
-	referenced := false
-	seen := 0
-	_ = filepath.WalkDir(s.root, func(p string, d os.DirEntry, err error) error {
-		if err != nil || referenced {
-			return filepath.SkipAll
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case ".git", ".grove", "node_modules", "vendor":
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		seen++
-		if seen > 20000 {
-			return filepath.SkipAll
-		}
-		rel, _ := filepath.Rel(s.root, p)
-		if !testFileRe.MatchString(rel) {
-			return nil
-		}
-		b, err := os.ReadFile(p)
-		if err == nil && re.Match(b) {
-			referenced = true
-			return filepath.SkipAll
-		}
-		return nil
-	})
-	return !referenced
+	return deadNew
 }
 
 // isSourceFile filters the engine checks to code the graph indexes.
@@ -1221,6 +1229,39 @@ func (s *Session) treeChanged(startFP string) bool {
 		return s.mutated
 	}
 	return treeFingerprint(s.root) != startFP
+}
+
+// walkMode reports whether MASON_WALK is set — the experimental part-by-part
+// graph-walk arm. In this mode the model is steered to walk the graph one node
+// at a time with graph_focus instead of loading a whole neighborhood, to test
+// whether a smaller working set keeps a local model on-rails. Off by default.
+func walkMode() bool {
+	v := os.Getenv("MASON_WALK")
+	return v == "1" || v == "true" || v == "on"
+}
+
+// walkSteer is appended to the system prompt in walk mode.
+const walkSteer = `
+
+WALK MODE — one node at a time. Do NOT load whole neighborhoods. To understand
+code, call graph_focus on a single symbol: you get that symbol's source plus a
+NAMES-ONLY menu of its neighbors. Expand a neighbor only by calling graph_focus
+on its name — walk the graph deliberately, one hop, toward exactly what your
+task needs. When you have seen enough to act, make the edit. If the target is
+already in the desired state, say so and STOP — do not manufacture changes or
+create scratch files.`
+
+// walkTools removes code_context (the whole-neighborhood dump) so the model
+// walks via graph_focus instead. Everything else is unchanged.
+func walkTools(all []provider.ToolDef) []provider.ToolDef {
+	out := all[:0:0]
+	for _, t := range all {
+		if t.Name == "code_context" {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
 }
 
 // codingToolsOnly strips the graph ops (and read_file's engine dependency is

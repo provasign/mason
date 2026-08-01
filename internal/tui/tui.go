@@ -96,7 +96,7 @@ var BuiltinCommands = []CommandInfo{
 	{"cost", "session token usage and cost"},
 	{"savings", "graph-read token ledger"},
 	{"compact", "condense old history (deterministic — no model call)"},
-	{"review", "engine-verified diff review (blast radius, coverage, stubs)"},
+	{"review", "engine-verified diff review (blast radius, stubs)"},
 	{"plan", "toggle read-only mode — investigate + plan, harness refuses mutations"},
 	{"sessions", "list saved conversations for this directory"},
 	{"resume", "switch to a saved conversation — /resume name <x> names this one"},

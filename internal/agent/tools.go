@@ -44,18 +44,18 @@ func toolDefs() []provider.ToolDef {
 			Parameters: obj(map[string]any{"includeAmbiguous": map[string]any{"type": "boolean"}})},
 		{Name: "missing_implementations", Description: "Every type in a contract's closure lacking an implementation ('who breaks if X becomes required').",
 			Parameters: obj(map[string]any{"symbol": str("Type.method")}, "symbol")},
-		{Name: "untested_surface", Description: "The change-set for a symbol split into test-covered and untested sites.",
-			Parameters: obj(map[string]any{"symbol": str("Type.method")}, "symbol")},
 		{Name: "dead_code", Description: "Unreachable production symbols: safe-to-delete list with caveats.",
 			Parameters: obj(map[string]any{})},
 
 		// --- coding tools (content delivered to the model) ---
-		{Name: "code_context", Description: "One-call task context from the code graph: the symbols matching your terms PLUS their callers, callees, and tests, compressed to fit. For bug-fix and implement tasks the result is verbatim LINE-NUMBERED source (identical to read_file output) plus each anchor's callers and covering tests — treat those blocks as reads you already performed: do NOT read_file the same files again; go straight to the edit. Use this FIRST when starting a task that spans files — it replaces a chain of read_file/grep round-trips. Do NOT use it for renames, signature changes, or deprecations: rename_plan and change_impact already return the COMPLETE set for those.",
+		{Name: "code_context", Description: "One-call task context from the code graph: the symbols matching your terms PLUS their callers and callees, compressed to fit. For bug-fix and implement tasks the result is verbatim LINE-NUMBERED source (identical to read_file output) plus each anchor's callers — treat those blocks as reads you already performed: do NOT read_file the same files again; go straight to the edit. Use this FIRST when starting a task that spans files — it replaces a chain of read_file/grep round-trips. Do NOT use it for renames, signature changes, or deprecations: rename_plan and change_impact already return the COMPLETE set for those.",
 			Parameters: obj(map[string]any{
 				"task":  str("what you are trying to do"),
 				"terms": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "symbol or keyword anchors, e.g. [\"SaveSession\"]"}}, "task", "terms")},
 		{Name: "read_file", Description: "Read a file (graph-aware, session-compressed: a repeat read of an unchanged file returns a short cached-pointer line meaning you ALREADY have the content earlier in this conversation — use that copy, do not re-request).",
 			Parameters: obj(map[string]any{"path": str("path relative to project root")}, "path")},
+		{Name: "graph_focus", Description: "Focus on ONE symbol: returns just that symbol's source PLUS a compact menu of its immediate graph neighbors (callers, callees) as NAMES only — not their bodies. To see a neighbor, call graph_focus again on that name. Use this to walk the code graph one hop at a time and stay on the exact path for your task, instead of loading a whole neighborhood you have to sift. Prefer this over code_context when you need to look at a specific symbol and decide where to go next.",
+			Parameters: obj(map[string]any{"symbol": str("qualified symbol, e.g. JsonNode.path")}, "symbol")},
 		{Name: "grep", Description: "Search file CONTENTS for a pattern (regex). Use for strings/config/docs. For callers, overrides, or change-sets of a known symbol, use change_impact instead — grep misses type-resolved sites.",
 			Parameters: obj(map[string]any{"pattern": str("regex"), "path": str("optional subdirectory or file")}, "pattern")},
 		{Name: "list_files", Description: "List files under a directory (recursive, name filter optional).",
@@ -75,6 +75,80 @@ func toolDefs() []provider.ToolDef {
 	}
 }
 
+// graphFrontier renders a symbol's immediate graph neighbors as a compact,
+// NAMES-ONLY menu (no bodies) — the "part" the model may expand next by
+// calling graph_focus on any listed name. Bodies are deliberately withheld so
+// the visible working set stays tiny and the model walks one deliberate hop at
+// a time. Built from prism_edges; returns "" when the graph has nothing.
+func graphFrontier(s *Session, sym string) string {
+	res, err := s.invoke("prism_edges", map[string]any{"name": sym, "direction": "both"})
+	if err != nil {
+		return ""
+	}
+	m, ok := res.(map[string]any)
+	if !ok {
+		return ""
+	}
+	edges, ok := m["edges"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	// Stable, human-meaningful ordering of edge groups.
+	order := []string{"calls out", "calls in", "implements", "implemented by",
+		"overrides", "overridden by", "uses type", "used by"}
+	seen := map[string]bool{}
+	var b strings.Builder
+	b.WriteString("// neighbors (call graph_focus on any name to expand):")
+	emit := func(group string) {
+		g, ok := edges[group].(map[string]any)
+		if !ok {
+			return
+		}
+		syms := asSlice(g["symbols"])
+		if len(syms) == 0 {
+			return
+		}
+		names := make([]string, 0, len(syms))
+		for _, raw := range syms {
+			if sm, ok := raw.(map[string]any); ok {
+				if n, _ := sm["name"].(string); n != "" {
+					names = append(names, n)
+				}
+			}
+		}
+		if len(names) == 0 {
+			return
+		}
+		total := len(names)
+		if shown, ok := g["total"].(float64); ok && int(shown) > total {
+			total = int(shown)
+		}
+		// Cap the menu so a fan-in hub cannot re-flood the context we are
+		// trying to keep small; note the elision honestly.
+		const menuCap = 12
+		more := ""
+		if len(names) > menuCap {
+			more = fmt.Sprintf(" … (+%d more, narrow with search_symbols)", len(names)-menuCap)
+			names = names[:menuCap]
+		}
+		fmt.Fprintf(&b, "\n//   %s (%d): %s%s", group, total, strings.Join(names, ", "), more)
+	}
+	for _, group := range order {
+		seen[group] = true
+		emit(group)
+	}
+	// Any edge groups we didn't enumerate explicitly.
+	for group := range edges {
+		if !seen[group] {
+			emit(group)
+		}
+	}
+	if b.Len() <= len("// neighbors (call graph_focus on any name to expand):") {
+		return ""
+	}
+	return b.String()
+}
+
 // graphOps maps model-facing graph tools to prism MCP names. Presence in
 // this map is what routes a call through the payload-isolation path.
 var graphOps = map[string]string{
@@ -82,7 +156,6 @@ var graphOps = map[string]string{
 	"change_impact":           "prism_change_impact",
 	"rename_plan":             "prism_rename_plan",
 	"missing_implementations": "prism_missing_implementations",
-	"untested_surface":        "prism_untested_surface",
 	"dead_code":               "prism_dead_code",
 }
 
@@ -350,7 +423,7 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 			return "", fmt.Errorf("code_context needs at least one term")
 		}
 		qargs := map[string]any{
-			"task": task, "terms": terms, "include": []string{"graph", "tests"},
+			"task": task, "terms": terms, "include": []string{"graph"},
 		}
 		// Delivery is decided by the USER's task, not the model's sub-phrasing:
 		// models phrase context calls as "analyze/understand X" even mid-fix,
@@ -383,22 +456,38 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 		}
 		return formatCodeContext(res), nil
 
-	case "lookup":
-		name, _ := call.Args["name"].(string)
-		s.setStatus("looking up %s", name)
+	case "graph_focus":
+		// Part-by-part graph walk: the symbol's own source (the "atom") plus a
+		// NAMES-ONLY menu of its immediate neighbors. This is the small,
+		// on-rails alternative to code_context's whole-neighborhood dump —
+		// the model sees one node and an expandable frontier, so it cannot
+		// wander into nodes it was never shown. Composed entirely from existing
+		// prism primitives (lookup + edges); no prism change, no stored state.
+		sym, _ := call.Args["symbol"].(string)
+		if sym == "" {
+			return "", fmt.Errorf("graph_focus needs a symbol")
+		}
 		if s.invoke == nil {
 			return "", fmt.Errorf("code graph unavailable — use read_file")
 		}
-		res, err := s.invoke("prism_lookup", map[string]any{"name": name})
-		if err != nil {
-			return "", err
+		s.setStatus("focusing %s", sym)
+		atom := ""
+		if lr, err := s.invoke("prism_lookup", map[string]any{"name": sym}); err == nil {
+			if lm, ok := lr.(map[string]any); ok {
+				atom, _ = lm["content"].(string)
+			}
 		}
-		m, _ := res.(map[string]any)
-		content, _ := m["content"].(string)
-		if content == "" {
-			return "", fmt.Errorf("no symbol named %q in the graph — try search_symbols", name)
+		if atom == "" {
+			return "", fmt.Errorf("no symbol named %q in the graph — try search_symbols", sym)
 		}
-		return truncate(content, maxToolOutput), nil
+		frontier := graphFrontier(s, sym)
+		out := fmt.Sprintf("// focus: %s\n%s", sym, strings.TrimRight(atom, "\n"))
+		if frontier != "" {
+			out += "\n\n" + frontier
+		} else {
+			out += "\n\n// (no graph neighbors — this is a leaf for the current task)"
+		}
+		return truncate(out, maxToolOutput), nil
 
 	case "grep":
 		pattern, _ := call.Args["pattern"].(string)

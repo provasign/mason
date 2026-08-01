@@ -727,28 +727,11 @@ func TestGroundingGuardSkipsGeneralQuestions(t *testing.T) {
 	}
 }
 
-// The engine-backed gate: untested new symbols surface as findings; dead
-// new symbols surface as info. Fake engine, no real grove needed.
+// The engine-backed gate: dead new symbols (in changed files) surface as
+// info. Fake engine, no real grove needed.
 func TestEngineChecks(t *testing.T) {
 	invoke := func(tool string, args map[string]any) (any, error) {
-		switch tool {
-		case "prism_untested_surface":
-			q, _ := args["query"].(string)
-			if q == "collectors.collect_all" {
-				return map[string]any{
-					"untested": []any{map[string]any{"filePath": "collectors.py", "name": q}},
-					"covered":  []any{},
-				}, nil
-			}
-			if q == "freefn" {
-				return nil, fmt.Errorf("change-impact: query must be Type.method, got %q", q)
-			}
-			return map[string]any{
-				"untested": []any{},
-				"covered":  []any{map[string]any{"filePath": "collectors.py"}},
-			}, nil
-
-		case "prism_dead_code":
+		if tool == "prism_dead_code" {
 			return map[string]any{"dead": []any{
 				map[string]any{"filePath": "collectors.py", "qualifiedName": "collectors.orphan"},
 				map[string]any{"filePath": "elsewhere.py", "qualifiedName": "not.in.this.task"},
@@ -756,28 +739,8 @@ func TestEngineChecks(t *testing.T) {
 		}
 		return map[string]any{}, nil
 	}
-	dir := t.TempDir()
-	// a test file that references collect_all but NOT freefn — the free-fn
-	// fallback must flag only freefn
-	os.WriteFile(filepath.Join(dir, "test_collectors.py"),
-		[]byte("from collectors import collect_all\n\ndef test_collect_all():\n    assert collect_all() is not None\n"), 0o644)
-	s := New(&fakeProvider{}, invoke, Options{Root: dir, Out: io.Discard,
-		FileSymbols: func(path string) []SymbolInfo {
-			return []SymbolInfo{
-				{Name: "collect_all", QualifiedName: "collectors.collect_all", Kind: "function", Line: 10},
-				{Name: "helper", QualifiedName: "collectors.helper", Kind: "function", Line: 30},
-				{Name: "freefn", QualifiedName: "freefn", Kind: "function", Line: 50}, // free fn → fallback path
-				{Name: "Config", QualifiedName: "collectors.Config", Kind: "class", Line: 1}, // skipped: not a function
-			}
-		}})
-	untested, dead := s.engineChecks([]string{"collectors.py"})
-	if len(untested) != 2 {
-		t.Fatalf("untested = %v", untested)
-	}
-	joined := untested[0].String() + untested[1].String()
-	if !strings.Contains(joined, "collect_all") || !strings.Contains(joined, "freefn") {
-		t.Fatalf("untested findings wrong: %v", untested)
-	}
+	s := New(&fakeProvider{}, invoke, Options{Root: t.TempDir(), Out: io.Discard})
+	dead := s.engineChecks([]string{"collectors.py"})
 	if len(dead) != 1 || !strings.Contains(dead[0].String(), "orphan") {
 		t.Fatalf("dead = %v (must include only changed-file symbols)", dead)
 	}
@@ -861,5 +824,91 @@ func TestCompletenessGateNudgesOnIncomplete(t *testing.T) {
 	}
 	if !nudged {
 		t.Fatal("model never saw the completeness nudge with the missed site")
+	}
+}
+
+// TestGraphFocusIsAtomPlusNamesOnly proves the part-by-part walker mechanism:
+// graph_focus returns the focused symbol's OWN source plus a NAMES-ONLY menu of
+// neighbors — never their bodies. This is the small, on-rails alternative to
+// code_context's whole-neighborhood dump (~17k tokens on a real task); the
+// model can only expand what it deliberately asks for, so it cannot wander into
+// nodes it was never shown.
+func TestGraphFocusIsAtomPlusNamesOnly(t *testing.T) {
+	// Fake prism: lookup returns the atom body; edges returns neighbor NAMES
+	// (with bodies deliberately absent, mirroring the real prism_edges shape).
+	fakeInvoke := func(tool string, args map[string]any) (any, error) {
+		switch tool {
+		case "prism_lookup":
+			return map[string]any{"content": "public abstract JsonNode path(String fieldName);"}, nil
+		case "prism_edges":
+			return map[string]any{"edges": map[string]any{
+				"calls in": map[string]any{"total": float64(2), "symbols": []any{
+					map[string]any{"name": "ObjectReaderTest.readNode", "file": "X.java", "line": float64(10)},
+					map[string]any{"name": "NodeMergeTest.merge", "file": "Y.java", "line": float64(22)},
+				}},
+				"tests": map[string]any{"total": float64(1), "symbols": []any{
+					map[string]any{"name": "MissingNodeTest.testPath", "file": "Z.java", "line": float64(40)},
+				}},
+			}}, nil
+		}
+		return nil, nil
+	}
+	s := New(&fakeProvider{}, fakeInvoke, Options{Root: t.TempDir(), Out: io.Discard})
+	out, err := s.runCodingTool(context.Background(), provider.ToolCall{
+		Name: "graph_focus", Args: map[string]any{"symbol": "JsonNode.path"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Atom body present.
+	if !strings.Contains(out, "public abstract JsonNode path(String fieldName)") {
+		t.Fatalf("focus output missing the atom body:\n%s", out)
+	}
+	// Neighbor NAMES present.
+	for _, name := range []string{"ObjectReaderTest.readNode", "NodeMergeTest.merge", "MissingNodeTest.testPath"} {
+		if !strings.Contains(out, name) {
+			t.Fatalf("focus output missing neighbor name %q:\n%s", name, out)
+		}
+	}
+	// The menu must NOT contain neighbor file paths as full reads / bodies — it
+	// is names-only. A crude but sufficient check: the neighbor source files are
+	// never opened, so their content markers never appear.
+	if strings.Contains(out, "class ObjectReaderTest") || strings.Contains(out, "class NodeMergeTest") {
+		t.Fatalf("focus leaked a neighbor BODY — must be names-only:\n%s", out)
+	}
+	// It must be small — the whole point. Real code_context on this task is
+	// ~17k tokens; the focused view must be a tiny fraction.
+	if len(out) > 1200 {
+		t.Fatalf("focus output too large (%d bytes) — should be a tiny atom+menu:\n%s", len(out), out)
+	}
+	t.Logf("graph_focus output = %d bytes (~%d tokens):\n%s", len(out), len(out)/4, out)
+}
+
+// TestWalkModeSwapsToolset proves MASON_WALK removes the code_context dump and
+// keeps graph_focus, so arm B genuinely walks part-by-part.
+func TestWalkModeSwapsToolset(t *testing.T) {
+	all := toolDefs()
+	names := func(ts []provider.ToolDef) map[string]bool {
+		m := map[string]bool{}
+		for _, x := range ts {
+			m[x.Name] = true
+		}
+		return m
+	}
+	base := names(all)
+	if !base["code_context"] || !base["graph_focus"] {
+		t.Fatal("baseline toolset should have both code_context and graph_focus")
+	}
+	walked := names(walkTools(all))
+	if walked["code_context"] {
+		t.Fatal("walk mode must remove code_context")
+	}
+	if !walked["graph_focus"] {
+		t.Fatal("walk mode must keep graph_focus")
+	}
+	// edit/read/bash still available — walk mode only swaps context delivery.
+	for _, keep := range []string{"edit_file", "read_file", "bash", "search_symbols"} {
+		if !walked[keep] {
+			t.Fatalf("walk mode dropped %q — it should only remove code_context", keep)
+		}
 	}
 }

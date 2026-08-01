@@ -56,10 +56,14 @@ func changedFilesSince(root string, startStatus map[string]string) []string {
 }
 
 // porcelainStatus maps repo-relative path → a state signature. -uall lists
-// untracked files INDIVIDUALLY, and untracked entries get a size+mtime
-// signature appended: git shows no content state for them, so an edit to an
-// already-untracked file would otherwise be invisible — which blinded the
-// honesty guard and the quality gate in fresh projects (measured).
+// untracked files INDIVIDUALLY, and EVERY entry gets a size+mtime signature
+// appended, because the porcelain line alone is not a content signature: a
+// file that was already " M" when the task started is still " M" after the
+// agent rewrites it, so the diff-against-the-start-snapshot saw nothing and
+// the honesty guard and quality gate went blind on exactly the files a
+// mid-work session touches most. (The same hole existed for untracked files
+// in fresh projects — measured — which is why the stat signature was added
+// there first; it belongs on all of them.)
 func porcelainStatus(root string) map[string]string {
 	out := map[string]string{}
 	b, err := exec.Command("git", "-C", root, "status", "--porcelain", "-uall").Output()
@@ -77,10 +81,8 @@ func porcelainStatus(root string) map[string]string {
 		}
 		path = strings.Trim(path, `"`)
 		sig := line
-		if strings.HasPrefix(line, "??") || strings.HasPrefix(line, "A ") || strings.HasPrefix(line, "AM") {
-			if fi, err := os.Stat(filepath.Join(root, path)); err == nil {
-				sig += fmt.Sprintf("|%d|%d", fi.Size(), fi.ModTime().UnixNano())
-			}
+		if fi, err := os.Stat(filepath.Join(root, path)); err == nil {
+			sig += fmt.Sprintf("|%d|%d", fi.Size(), fi.ModTime().UnixNano())
 		}
 		out[path] = sig
 	}
