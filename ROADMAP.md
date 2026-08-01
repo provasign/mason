@@ -9,7 +9,8 @@ compile oracles, quality gates).
 
 ## Unique today (keep sharpening)
 - Type-resolved graph ops, forced via the invocation wall; relay by construction
-- Graph-verified quality gate: untested/dead new code flagged at file:line, fix forced
+- Graph-verified quality gate: dead new code and diff-completeness gaps flagged at
+  file:line, fix forced (fail-closed — never a false "complete")
 - Honesty / grounding / refusal guards — the tree, not the model, is truth
 - Secret redaction (default-on, zero-leak verified) before model and screen
 - Token ledger with SHA-pointer reads; per-session savings shown
@@ -50,7 +51,6 @@ parallel sessions · themes · first-class Windows QA · multi-repo workspaces
   calls, zero cost, nothing to misremember; oldest entries elide first)
 - ✅ code_context tool (v0.20: prism_query compressed delivery as direct model food —
   measured 52% token savings vs raw reads on first live use)
-- Grove: free-function untested_surface (completes the gate for Python/Go)
 - Optional Shale-backed PR descriptions with evidence-verified claims
 
 ## Evidence assets (marketing = measurements)
