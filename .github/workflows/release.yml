@@ -126,3 +126,32 @@ jobs:
           files: |
             dist/*
             install.sh
+
+      # mason's formula sat 16 releases behind (0.15.0 while v0.31.1 shipped)
+      # because nothing here updated it — like prism, mason builds its assets
+      # by hand rather than through GoReleaser, so it never had the publish
+      # step shale has. Without a token the step warns and exits 0: a missing
+      # secret must not fail an otherwise good release, nor pass silently.
+      - name: Publish Homebrew formula
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${HOMEBREW_TAP_TOKEN:-}" ]; then
+            echo "::warning::HOMEBREW_TAP_TOKEN not set — tap NOT updated; brew will keep serving the previous version"
+            exit 0
+          fi
+          scripts/gen-homebrew-formula.sh "${GITHUB_REF_NAME}" dist/checksums.txt > /tmp/mason.rb
+          tap="$(mktemp -d)"
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/provasign/homebrew-shale.git" "${tap}"
+          mkdir -p "${tap}/Formula"
+          cp /tmp/mason.rb "${tap}/Formula/mason.rb"
+          git -C "${tap}" config user.name "github-actions[bot]"
+          git -C "${tap}" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -z "$(git -C "${tap}" status --porcelain -- Formula/mason.rb)" ]; then
+            echo "Homebrew formula already current."
+            exit 0
+          fi
+          git -C "${tap}" add Formula/mason.rb
+          git -C "${tap}" commit -m "Brew formula update for mason ${GITHUB_REF_NAME}"
+          git -C "${tap}" push origin HEAD:main
