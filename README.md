@@ -36,7 +36,7 @@ through grep. mason makes both structurally impossible:
   body. Savings are ledgered and shown after each session.
 - **Edit-ready context** — for a change or a bug fix, `code_context` returns
   prism's source delivery: the relevant code as verbatim, line-numbered
-  windows plus each anchor's callers and covering tests, in one call. The
+  windows plus each anchor's callers, in one call. The
   harness picks that delivery from the *task's* intent, not the model's
   phrasing, and the model is told those windows are reads it already holds —
   so it edits instead of re-reading. This extends mason past change-impact to

@@ -52,12 +52,21 @@ func toolDefs() []provider.ToolDef {
 			Parameters: obj(map[string]any{
 				"task":  str("what you are trying to do"),
 				"terms": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "symbol or keyword anchors, e.g. [\"SaveSession\"]"}}, "task", "terms")},
-		{Name: "read_file", Description: "Read a file (graph-aware, session-compressed: a repeat read of an unchanged file returns a short cached-pointer line meaning you ALREADY have the content earlier in this conversation — use that copy, do not re-request).",
-			Parameters: obj(map[string]any{"path": str("path relative to project root")}, "path")},
+		{Name: "read_file", Description: "Read a file (graph-aware, session-compressed: a repeat read of an unchanged file returns a short cached-pointer line meaning you ALREADY have the content earlier in this conversation — use that copy, do not re-request). offset/limit read an exact line window — use them when you only need part of a file.",
+			Parameters: obj(map[string]any{
+				"path":   str("path relative to project root"),
+				"offset": map[string]any{"type": "integer", "description": "first line to read (1-based); omit for whole file"},
+				"limit":  map[string]any{"type": "integer", "description": "number of lines from offset"},
+			}, "path")},
 		{Name: "graph_focus", Description: "Focus on ONE symbol: returns just that symbol's source PLUS a compact menu of its immediate graph neighbors (callers, callees) as NAMES only — not their bodies. To see a neighbor, call graph_focus again on that name. Use this to walk the code graph one hop at a time and stay on the exact path for your task, instead of loading a whole neighborhood you have to sift. Prefer this over code_context when you need to look at a specific symbol and decide where to go next.",
 			Parameters: obj(map[string]any{"symbol": str("qualified symbol, e.g. JsonNode.path")}, "symbol")},
-		{Name: "grep", Description: "Search file CONTENTS for a pattern (regex). Use for strings/config/docs. For callers, overrides, or change-sets of a known symbol, use change_impact instead — grep misses type-resolved sites.",
-			Parameters: obj(map[string]any{"pattern": str("regex"), "path": str("optional subdirectory or file")}, "pattern")},
+		{Name: "grep", Description: "Search file CONTENTS for a pattern (regex, graph-aware): results carry the graph's organization when it helps — a searched symbol's implementations+callers inline, and on big result sets ALL matches grouped by enclosing symbol. Use for strings/config/docs. For callers, overrides, or change-sets of a known symbol, use change_impact instead — grep misses type-resolved sites.",
+			Parameters: obj(map[string]any{
+				"pattern":    str("regex"),
+				"path":       str("optional subdirectory or file"),
+				"context":    map[string]any{"type": "integer", "description": "lines of surrounding source per match (grep -C) — instead of a follow-up read_file"},
+				"files_only": map[string]any{"type": "boolean", "description": "return only matching file paths — cheapest answer to 'where does this live'"},
+			}, "pattern")},
 		{Name: "list_files", Description: "List files under a directory (recursive, name filter optional).",
 			Parameters: obj(map[string]any{"path": str("directory, default root"), "filter": str("optional substring")})},
 		{Name: "edit_file", Description: "Replace an exact text snippet in a file. old_text must match exactly once.",
@@ -397,12 +406,29 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 			}
 			return truncate(string(b), maxToolOutput), nil
 		}
-		res, err := s.invoke("prism_read", map[string]any{"file": path})
+		rargs := map[string]any{"file": path}
+		// Ranged reads (prism >= v0.55): half of real agent reads are
+		// line-ranged; pulling whole files for a window wastes the budget
+		// the session cache exists to protect.
+		if off := intArg(call.Args, "offset"); off > 0 {
+			rargs["offset"] = off
+		}
+		if lim := intArg(call.Args, "limit"); lim > 0 {
+			rargs["limit"] = lim
+		}
+		res, err := s.invoke("prism_read", rargs)
 		if err != nil {
 			return "", err
 		}
 		m, _ := res.(map[string]any)
 		content, _ := m["content"].(string)
+		if sl, ok := m["startLine"]; ok {
+			content = fmt.Sprintf("// %s lines %v-%v of %v\n%s",
+				path, sl, m["endLine"], m["totalLines"], content)
+		}
+		if note, _ := m["note"].(string); note != "" {
+			content += "\n// " + note
+		}
 		return truncate(content, maxToolOutput), nil
 
 	case "code_context":
@@ -435,8 +461,14 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 		// contracts change, computed before the first edit (measured across
 		// three model tiers: 0.90-0.98 recall vs 0.72-0.96 for grep at
 		// 5-15x fewer tokens).
-		if mutationIntent.MatchString(s.curTask) {
+		if mutationIntent.MatchString(s.curTask) && !s.unifiedGone {
 			res, err := s.invoke("prism", qargs)
+			if err != nil {
+				// The unified prepare op is not in every engine (absent in
+				// v0.55.x). Remember, so every later code_context skips the
+				// doomed call instead of re-failing it.
+				s.unifiedGone = true
+			}
 			if err == nil {
 				if m, ok := res.(map[string]any); ok {
 					out := formatCodeContext(m["read"])
@@ -493,6 +525,33 @@ func (s *Session) runCodingTool(ctx context.Context, call provider.ToolCall) (st
 		pattern, _ := call.Args["pattern"].(string)
 		sub, _ := call.Args["path"].(string)
 		s.setStatus("searching for %s", truncate(pattern, 40))
+		// Graph-aware path (prism >= v0.55): same grep semantics, but the
+		// result carries the graph's organization when it helps — the
+		// structural note (a searched symbol's implementations+callers) and,
+		// on truncation, the FULL hit set grouped by enclosing symbol. The
+		// model gets the narrowing decision in this turn, not the next one.
+		if s.invoke != nil {
+			sargs := map[string]any{"query": pattern, "scope": "text", "regex": true}
+			if sub != "" {
+				sargs["path"] = sub
+			}
+			if n := intArg(call.Args, "context"); n > 0 {
+				sargs["context"] = n
+			}
+			if fo, _ := call.Args["files_only"].(bool); fo {
+				sargs["files_only"] = true
+			}
+			if res, err := s.invoke("prism_search", sargs); err == nil {
+				if m, ok := res.(map[string]any); ok {
+					if text := renderTextSearch(m); text != "" {
+						return truncate(text, maxToolOutput), nil
+					}
+					return "(no matches)", nil
+				}
+			}
+			// engine error: fall through to plain grep — search must never
+			// be the tool that breaks.
+		}
 		target := s.root
 		if sub != "" {
 			t, err := s.inRoot(sub)

@@ -167,6 +167,7 @@ type Session struct {
 	renameAmbiguousLeft int              // ambiguous edits not yet applied
 	checkpoints         []string         // snapshot commits, newest last (/undo)
 	curTask             string           // the user task being served; steers code_context delivery
+	unifiedGone         bool             // engine lacks the unified "prism" op; skip it after first failure
 	pendingNote         string           // folded into the next task message (e.g. undo notice)
 	pendingImages       []provider.Image // queued by --image for the next task
 	pendingImageNames   []string
