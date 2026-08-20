@@ -42,6 +42,8 @@ func toolDefs() []provider.ToolDef {
 			Parameters: obj(map[string]any{"symbol": str("Type.method"), "newName": str("new member name")}, "symbol", "newName")},
 		{Name: "apply_rename_plan", Description: "Apply the most recent rename_plan to the working tree. Set includeAmbiguous=true only when a verify command will run.",
 			Parameters: obj(map[string]any{"includeAmbiguous": map[string]any{"type": "boolean"}})},
+		{Name: "revert_ambiguous_edits", Description: "Undo ONLY the ambiguous edits of the last applied rename plan, keeping every confirmed edit. Use this when the build broke after includeAmbiguous=true — it removes the collateral without undoing the rename. Never invert the whole rename to fix a broken build.",
+			Parameters: obj(map[string]any{})},
 		{Name: "missing_implementations", Description: "Every type in a contract's closure lacking an implementation ('who breaks if X becomes required').",
 			Parameters: obj(map[string]any{"symbol": str("Type.method")}, "symbol")},
 		{Name: "dead_code", Description: "Unreachable production symbols: safe-to-delete list with caveats.",

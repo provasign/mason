@@ -168,6 +168,8 @@ type Session struct {
 	checkpoints         []string         // snapshot commits, newest last (/undo)
 	curTask             string           // the user task being served; steers code_context delivery
 	unifiedGone         bool             // engine lacks the unified "prism" op; skip it after first failure
+	obligations         []obligation     // engine-checkable postconditions registered by applied graph ops
+	appliedAmbiguous    []any            // ambiguous edits applied by the last rename apply (for scoped revert)
 	pendingNote         string           // folded into the next task message (e.g. undo notice)
 	pendingImages       []provider.Image // queued by --image for the next task
 	pendingImageNames   []string
@@ -480,6 +482,8 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 		}
 	}
 	s.mutated = false
+	s.obligations = nil
+	s.appliedAmbiguous = nil
 	s.renamePlanPending = false
 	s.renameAmbiguousLeft = 0
 	nudged := false
@@ -717,6 +721,24 @@ func (s *Session) Ask(ctx context.Context, task string) (string, error) {
 				}
 				fmt.Fprintf(s.out, "\n%s\n", s.st.yellow("⚠ mason: this task asked for a change but no file was modified"))
 			}
+			// Obligation check: goal-state, not effort-state. Each applied
+			// graph op registered an engine-checkable postcondition; a
+			// completion claim that leaves one unmet is goal substitution
+			// (measured: rename applied, then inverted to "fix" the build —
+			// tree green, task undone). Reject once with the SPECIFIC unmet
+			// obligation; on a repeat claim, flag it and let the user see.
+			if !s.plan {
+				if unmet := s.checkObligations(); len(unmet) > 0 {
+					if !nudged {
+						nudged = true
+						s.msgs = append(s.msgs, reply, provider.Msg{Role: "user",
+							Content: "Task obligation UNMET: " + strings.Join(unmet, "; ") + ". " +
+								"The task is not done — meet the obligation (or state explicitly why it no longer applies) before summarizing."})
+						continue
+					}
+					fmt.Fprintf(s.out, "\n%s\n", s.st.yellow("⚠ mason: task obligation unmet — "+strings.Join(unmet, "; ")))
+				}
+			}
 			s.msgs = append(s.msgs, reply)
 			if !shown {
 				fmt.Fprintf(s.out, "\n%s\n", s.renderFinal(text))
@@ -882,6 +904,10 @@ func (s *Session) dispatch(ctx context.Context, call provider.ToolCall, tr *trai
 		s.mutated = true
 		s.renamePlanPending = false
 		s.renameAmbiguousLeft = ambLeft
+		if includeAmbiguous {
+			s.appliedAmbiguous = asSlice(s.lastRenamePlan["ambiguous"])
+		}
+		s.registerRenameObligation(s.lastRenamePlan)
 		tr.Note("applied rename plan (ambiguous=%v)", includeAmbiguous)
 		// The model must know the FULL apply state — especially the ambiguous
 		// remainder. Without this it hand-fixes the leftover callers one by
@@ -892,6 +918,45 @@ func (s *Session) dispatch(ctx context.Context, call provider.ToolCall, tr *trai
 			res += fmt.Sprintf(". %d AMBIGUOUS caller edits were NOT applied — if the build fails on the renamed symbol, call apply_rename_plan again with includeAmbiguous=true (one call fixes all of them; already-applied lines are skipped automatically). Do NOT edit rename sites by hand", ambLeft)
 		}
 		return res + ". Now verify with the project's build or tests.", nil
+	}
+
+	if call.Name == "revert_ambiguous_edits" {
+		if s.plan {
+			return "", errPlan("revert_ambiguous_edits")
+		}
+		if len(s.appliedAmbiguous) == 0 {
+			return "", fmt.Errorf("no ambiguous edits from a rename plan have been applied in this task")
+		}
+		s.setStatus("reverting ambiguous rename edits…")
+		if !s.permitDetail("revert ambiguous rename edits",
+			fmt.Sprintf("%d ambiguous edit(s) will be inverted; confirmed edits stay", len(s.appliedAmbiguous))) {
+			return "", fmt.Errorf("user denied revert")
+		}
+		// Invert before/after and reuse the drift-checked applier: a line
+		// later edited by hand no longer matches and is SKIPPED, reported.
+		inverted := make([]any, 0, len(s.appliedAmbiguous))
+		for _, e := range s.appliedAmbiguous {
+			em, _ := e.(map[string]any)
+			if em == nil {
+				continue
+			}
+			inv := map[string]any{}
+			for k, v := range em {
+				inv[k] = v
+			}
+			inv["before"], inv["after"] = em["after"], em["before"]
+			inverted = append(inverted, inv)
+		}
+		applied, skipped, _, err := applyRenamePlan(s.out, s.root, map[string]any{"edits": inverted}, false)
+		if err != nil {
+			return "", err
+		}
+		s.mutated = true
+		s.appliedAmbiguous = nil
+		tr.Note("reverted ambiguous rename edits (applied=%d skipped=%d)", applied, skipped)
+		return fmt.Sprintf("reverted %d ambiguous edit(s), %d skipped (line drifted since apply). "+
+			"The confirmed rename edits are still in place. Handle the remaining ambiguous call sites "+
+			"individually if the task needs them.", applied, skipped), nil
 	}
 
 	if call.Name == "subagent" {
@@ -1200,6 +1265,18 @@ func (s *Session) readForContext(rel string) string {
 // to the mutating-tool flag.
 func treeFingerprint(root string) string {
 	stMap := porcelainStatus(root)
+	// Harness/self artifacts must not count as "the tree changed": the
+	// .shale evidence trail grows on EVERY turn, so including it makes the
+	// end-of-task fingerprint always differ from the start — which blinded
+	// the net-zero honesty check completely (measured: a 30B renamed, then
+	// applied the exact inverse plan, and its "success" summary passed the
+	// guard because the only net change was mason's own trail file).
+	for k := range stMap {
+		if strings.HasPrefix(k, ".shale/") || strings.HasPrefix(k, ".grove/") ||
+			strings.HasPrefix(k, ".claude/") {
+			delete(stMap, k)
+		}
+	}
 	if len(stMap) == 0 {
 		// distinguish "clean repo" from "no git": probe git itself
 		if err := exec.Command("git", "-C", root, "rev-parse", "--git-dir").Run(); err != nil {
