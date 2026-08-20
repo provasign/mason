@@ -856,6 +856,24 @@ func (s *Session) dispatch(ctx context.Context, call provider.ToolCall, tr *trai
 			return "", err
 		}
 		if call.Name == "rename_plan" {
+			// Session-cache pointer guard (prism >= v0.55): a repeat of the
+			// IDENTICAL plan request returns a cached pointer — no edits —
+			// because prism assumes the requester holds the earlier payload.
+			// In mason the MODEL never held it; the harness did. Overwriting
+			// the stored plan with the pointer starved the applier ("no
+			// confirmed edits to apply") and drove a live 30B into hand-
+			// editing rename sites, the exact pathology the wall exists to
+			// prevent. Keep the held plan; the pointer confirms it is
+			// current ("result recomputed just now and is IDENTICAL").
+			if s.lastRenamePlan != nil && len(asSlice(full["edits"])) == 0 &&
+				len(asSlice(full["ambiguous"])) == 0 {
+				if note, _ := full["note"].(string); strings.Contains(note, "[prism:cached]") {
+					s.renamePlanPending = true
+					render(s.out, call, full, s.st, s.opts.CompactRender)
+					tr.Note("prism rename_plan: cached pointer — held plan retained")
+					return "plan unchanged from the one already produced — call apply_rename_plan to apply it", nil
+				}
+			}
 			s.lastRenamePlan = full
 			s.renamePlanPending = true
 			s.renameAmbiguousLeft = len(asSlice(full["ambiguous"]))

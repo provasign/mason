@@ -1,10 +1,15 @@
 package agent
 
 import (
+	"context"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/provasign/mason/internal/provider"
+	"github.com/provasign/mason/internal/trail"
 )
 
 // fakeInvoker returns canned lookup results per symbol name.
@@ -149,3 +154,41 @@ func execCommand(dir string, args ...string) (string, error) {
 
 func osMkdirAll(p string, m os.FileMode) error  { return os.MkdirAll(p, m) }
 func osWriteFile(p string, b []byte, m os.FileMode) error { return os.WriteFile(p, b, m) }
+
+// The regression the v0.55 upgrade exposed live: a repeat of the identical
+// rename_plan request returns a session-cache POINTER (no edits) — prism
+// assumes the requester holds the payload, but in mason the model never did.
+// Overwriting the held plan starved the applier and drove the model into
+// hand-editing. The held plan must survive a pointer-shaped repeat.
+func TestRenamePlanCachePointerKeepsHeldPlan(t *testing.T) {
+	s := &Session{st: style{}}
+	held := map[string]any{
+		"query": "ResponseWriter.Status", "newName": "StatusCode",
+		"edits": []map[string]any{{"filePath": "a.go", "line": 1, "before": "Status", "after": "StatusCode"}},
+	}
+	s.lastRenamePlan = held
+	calls := 0
+	s.invoke = func(tool string, args map[string]any) (any, error) {
+		calls++
+		return map[string]any{
+			"query": "ResponseWriter.Status", "newName": "StatusCode",
+			"note": "// [prism:cached] prism_rename_plan @sha:abc (seen ×2, result recomputed just now and is IDENTICAL)",
+		}, nil
+	}
+	s.out = io.Discard
+	res, err := s.dispatch(context.Background(), provider.ToolCall{
+		Name: "rename_plan", Args: map[string]any{"symbol": "ResponseWriter.Status", "newName": "StatusCode"}},
+		trail.New("", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.lastRenamePlan == nil || len(asSlice(s.lastRenamePlan["edits"])) != 1 {
+		t.Fatalf("held plan was overwritten by the cache pointer: %v", s.lastRenamePlan)
+	}
+	if !s.renamePlanPending {
+		t.Error("pointer repeat must still arm the apply wall")
+	}
+	if !strings.Contains(res, "apply_rename_plan") {
+		t.Errorf("model must be pointed at apply, got %q", res)
+	}
+}
