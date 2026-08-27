@@ -1,0 +1,15 @@
+{
+  "enabledMcpjsonServers": [
+    "prism"
+  ],
+  "permissions": {
+    "allow": [
+      "mcp__prism"
+    ],
+    "deny": [
+      "Grep",
+      "Bash(grep:*)",
+      "Bash(rg:*)"
+    ]
+  }
+}
