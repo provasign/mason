@@ -40,8 +40,10 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
-      - name: build prism (pinned dep)
-        run: go build -o /tmp/prism github.com/provasign/prism/cmd/prism
+      - name: install prism (release)
+        # A released binary, not a build of mason's go.mod pin: that pin
+        # (v0.55.11) no longer builds standalone (missing go.sum entries).
+        run: curl -fsSL https://raw.githubusercontent.com/provasign/prism/main/install.sh | VERSION=v1.0.1 INSTALL_DIR=/tmp bash
       - name: verify diff vs base
         continue-on-error: true
         run: |
