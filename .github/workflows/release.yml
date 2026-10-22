@@ -143,7 +143,7 @@ jobs:
           fi
           scripts/gen-homebrew-formula.sh "${GITHUB_REF_NAME}" dist/checksums.txt > /tmp/mason.rb
           tap="$(mktemp -d)"
-          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/provasign/homebrew-shale.git" "${tap}"
+          git clone "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/provasign/homebrew-tap.git" "${tap}"
           mkdir -p "${tap}/Formula"
           cp /tmp/mason.rb "${tap}/Formula/mason.rb"
           git -C "${tap}" config user.name "github-actions[bot]"
